@@ -225,7 +225,7 @@ for i,s1 in enumerate(samples):
                 sample_parents[j] = i
 final_samples = list(set(sample_parents))
 
-def closest_sample(p, fs=final_samples, shifts = 3):
+def closest_sample(p, fs=final_samples, shifts = 1):
     # we shift a few times so that the cluster is more relevant
     p2 = np.copy(p)
     for _ in range(shifts):
