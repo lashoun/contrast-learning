@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.2'
-#       jupytext_version: 1.0.4
+#       jupytext_version: 1.0.5
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -16,228 +16,168 @@
 # %% [markdown]
 # # First draft of Contrast algorithm
 
+# %% [markdown]
+# ## Imports
+
 # %%
 import csv
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 import time
+import seaborn as sns
+import pandas as pd
+
+np.random.seed(1)
 
 # %% [markdown]
 # ## Global variables
 
 # %%
-NB_FEATURES = 2
-N = 1000
+NB_FEATURES = 5
+NB_GROUPS = 8
+N = 500
+SIZE = 200
+DEV = 20
+colors = ['r', 'g', 'b', 'y', 'c', 'm']
 
 
 # %% [markdown]
 # ## Generate dataset
 
 # %%
-def generate_dataset(nb_features = 10, nb_groups = 3, n = N):
+def generate_dataset(nb_features = NB_FEATURES, nb_groups = NB_GROUPS, n = N, size=SIZE, dev=DEV):
+    clusters_true = np.zeros(n)
     means = np.zeros((nb_groups, nb_features)) # holds the mean of each group
     st_devs = np.zeros((nb_groups, nb_features)) # holds the st_devs of each group
     for i in range(nb_groups):
         for j in range(nb_features):
-            means[i][j] = np.random.randint(-50, 50)
-            st_devs[i][j] = 10*np.random.random()
+            means[i][j] = np.random.randint(-size, size)
+            st_devs[i][j] = dev*np.random.random()
     data = np.zeros((n, nb_features))
     for i in range(n):
         gi = np.random.randint(0,nb_groups)
+        clusters_true[i] = gi
         for j in range(nb_features):
             data[i][j] = np.random.normal(loc = means[gi][j], scale = st_devs[gi][j])
     np.save('dummy_data.npy', data)
+    np.save('dummy_clusters.npy', clusters_true)
 
 
 # %%
-generate_dataset(nb_features=NB_FEATURES)
+generate_dataset()
 
-# %%
-data = np.load('dummy_data1.npy')
+data = np.load('dummy_data.npy')
+clusters_true = np.load('dummy_clusters.npy')
 
-# %%
-f1 = data[:, 0]
-f2 = data[:, 1]
-X = np.array(list(zip(f1, f2)))
-plt.plot(f1, f2, 'ro')
+columns = ["d" + str(i) for i in range(data.shape[1])] + ['true clusters']
+df = pd.DataFrame(np.hstack((data,np.reshape([clusters_true],(data.shape[0],1)))), columns=columns)
+sns.pairplot(df, kind="scatter", hue='true clusters', vars=columns[:-1])
 
+# f1 = data[:, 0]
+# f2 = data[:, 1]
+# X = np.array(list(zip(f1, f2)))
+# plt.plot(f1, f2, 'ro')
 
 # %% [markdown]
-# ## Utility functions
+# ## The agent
 
 # %%
-# Euclidean Distance Caculator
-def dist(a, b, ax=0):
-    return np.linalg.norm(a - b, axis=ax)
+def distance(p, q, ord=2):
+    return(np.linalg.norm(p-q, ord))
 
-def gaussian_kernel(x, bandwidth = 1):
-    return np.exp(-x/(2 * bandwidth**2))
+class ContrastAgent(object):
+    def __init__(self, rigged_shuffle=False, verbose=False):
+        self.clusters = np.array([])
+        self.cluster_sizes = []
+        self.data = np.array([[]])
+        self.first_time = True
+        self.nb_clusters = 0
+        self.nb_seen = 0
+        self.sensitiveness = 1.5 # if a point is alone with a radius of sensitiveness * stdist, create a new cluster
+        self.stdist = 0
+        self.verbose = verbose
 
-# %% [markdown]
-# ## K-means
+    def clusterize_online(self):
+        assert len(self.data), "empty data"
+        if self.first_time:
+            self.first_time = False
+            self.new_cluster(0)
+            self.one_more_seen()
+        for i, p in enumerate(self.data[self.nb_seen:], start=self.nb_seen):
+            self.find_cluster(i, p, i)
+            self.one_more_seen()
 
+    def feed_data(self, data):
+        """Adds data to the agent's memory"""
+        if self.first_time:
+            self.data = np.copy(data)
+            self.clusters = np.zeros(len(data))
+            self.clusters.fill(-1)
+        else:
+            new_data = np.vstack((self.data, np.copy(data)))
+            self.data = new_data
+            new_clusters = np.zeros(len(data))
+            new_clusters.fill(-1)
+            new_clusters_all = np.hstack((self.clusters, new_clusters))
+            self.clusters = new_clusters_all
 
-# %%
-# code from https://github.com/mubaris/friendly-fortnight/blob/master/kmeans-from-scratch-and-sklearn.py
+    def find_cluster(self, i, p, until=None, recollection=False):
+        distances = np.array([distance(p,q) for q in self.data[:until] if not np.all(p == q)])
+        dist_min = np.min(distances)
+        if not recollection:
+            self.update_stdist(self.nb_seen, dist_min)
+        closest = np.argmin(distances)
+        if dist_min > self.sensitiveness * self.stdist:
+#                 if self.verbose:
+#                     print("new cluster")
+            if self.clusters[i] == -1 or not self.cluster_sizes[int(self.clusters[i])] == 1:
+                # if p not already seen or is not already alone
+                self.new_cluster(i)
+        else:
+#                 if self.verbose:
+#                     print("-> cluster of {}".format(closest))
+            self.clusters[i] = self.clusters[closest]
+            self.cluster_sizes[int(self.clusters[i])] += 1
+            
+    def new_cluster(self, p_index):
+        self.clusters[p_index] = self.nb_clusters
+        self.nb_clusters += 1
+        self.cluster_sizes.append(1)
 
-# Number of clusters
-k = 3
+    def one_more_seen(self):
+        self.nb_seen += 1
 
-EPS = 10**(-6)
-X = np.array(list(zip(f1, f2)))
+#     def print_clusters_old(self, only=-1):
+#         self.colors = cm.rainbow(np.linspace(0, 1, self.nb_clusters))
+#         for k in range(self.nb_clusters):
+#             if only < 0 or k == only:
+#                 points = np.array([self.data[i] for i in range(len(self.data)) if self.clusters[i] == k])
+#                 plt.plot(points[:,0], points[:,1], 'o', color=self.colors[k])
+                
+    def print_clusters(self):
+        columns = ["d" + str(i) for i in range(self.data.shape[1])] + ['cluster']
+        df_1 = pd.DataFrame(np.hstack((self.data,np.reshape([self.clusters],(ca.data.shape[0],1)))),  columns=columns)
+        sns.pairplot(df_1, kind="scatter", hue="cluster", vars=columns[:-1])
+                
+    def shuffle(self):
+        np.random.shuffle(self.data)
 
-C = np.zeros((k, NB_FEATURES))
-for i in range(NB_FEATURES):
-    C[:,i] = np.random.randint(np.min(X[:,i]), np.max(X[:,i]), size=k)
-print("Initial Centroids")
-print(C)
-
-# Plotting along with the Centroids
-plt.scatter(f1, f2, c='#050505', s=7)
-plt.scatter(C[:,0], C[:,1], marker='*', s=200, c='g')
-
-# To store the value of centroids when it updates
-C_old = np.zeros(C.shape)
-# Cluster Lables(0, 1, 2)
-clusters = np.zeros(len(X))
-# Error func. - Distance between new centroids and old centroids
-error = dist(C, C_old, None)
-
-colors = ['r', 'g', 'b', 'y', 'c', 'm']
-
-# Loop will run till the error becomes zero
-while error >= EPS:
-    # Assigning each value to its closest cluster
-    for i in range(len(X)):
-        distances = dist(X[i], C, ax=1)
-        cluster = np.argmin(distances)
-        clusters[i] = cluster
-    # Storing the old centroid values
-    C_old = np.copy(C)
-    # Finding the new centroids by taking the average value
-    for i in range(k):
-        points = [X[j] for j in range(len(X)) if clusters[j] == i]
-        C[i] = np.mean(points, axis=0)
-    error = dist(C, C_old, None)
-
-fig, ax = plt.subplots()
-for i in range(k):
-    points = np.array([X[j] for j in range(len(X)) if clusters[j] == i])
-    ax.scatter(points[:, 0], points[:, 1], s=7, c=colors[i])
-ax.scatter(C[:, 0], C[:, 1], marker='*', s=200, c='#050505')
-
-# %% [markdown]
-# ## Mean-shift clustering
-
-# %%
-# code from https://spin.atomicobject.com/2015/05/26/mean-shift-clustering/
-
-KERNEL_BANDWIDTH = 1
-X = np.array(list(zip(f1, f2)))
-sample_x = 5
-sample_y = 4
-nb_samples = sample_x * sample_y
-EPS = 10**(-6)
-
-def initial_samples(sx=sample_x, sy=sample_y):
-    x_tmp = np.tile(np.linspace(np.min(X[:,0]), np.max(X[:,0]), num=sx), (sy,1)).flatten()
-    y_tmp = np.tile(np.linspace(np.min(X[:,1]), np.max(X[:,1]), num=sy), (sx,1)).transpose().flatten()
-    samples = np.array([x_tmp, y_tmp]).transpose()
-    return(samples)
-
-samples = initial_samples()
-print("samples intialized")
-
-def compute_kde(p, X):
-    weight = 0
-    for i,_ in enumerate(X):
-        d = dist(p, X[i])
-        weight += gaussian_kernel(d, KERNEL_BANDWIDTH)
-    return weight
-
-OLD_SAMPLES = np.copy(samples)
-
-fig, ax = plt.subplots()
-for i,_ in enumerate(X):
-    ax.scatter(X[i][0], X[i][1], s=7, c=colors[1], zorder = 0)
-for i,_ in enumerate(samples):
-    ax.scatter(samples[i][0], samples[i][1], s=15, c=colors[0], zorder = 2)
-
-
-# %% [markdown]
-# ---
-# Now we shift the samples
-
-# %%
-fig, ax = plt.subplots()
-samples = np.copy(OLD_SAMPLES)
-at_peak = np.full(len(samples), False, dtype=bool)
-
-def shift(p):
-    shift_coord = np.zeros((NB_FEATURES))
-    scale_factor = 0
-    for i,_ in enumerate(X):
-        # numerator
-        d = dist(p, X[i])
-        weight = gaussian_kernel(d, KERNEL_BANDWIDTH)
-        for j,_ in enumerate(shift_coord):
-            shift_coord[j] += X[i][j] * weight
-        # demonimator
-        scale_factor += weight
-    for j,_ in enumerate(shift_coord):
-        shift_coord[j] = shift_coord[j] / scale_factor
-    return shift_coord
-
-for i,_ in enumerate(samples):
-    if i%5==1:
-        print("sample {} converged".format(i-1))
-    count = 0
-    while not at_peak[i]:
-        if count==0:
-            ax.scatter(samples[i][0], samples[i][1], s=10, c=colors[3], zorder = 1)
-        elif count<5 or count%3 == 0:
-            ax.scatter(samples[i][0], samples[i][1], s=10, c=colors[2], zorder = 1)
-        new_sample = shift(samples[i])
-        if np.all(np.abs(new_sample - samples[i]) < EPS):
-            at_peak[i] = True
-        samples[i] = new_sample
-        count += 1
-
-for i,_ in enumerate(X):
-    ax.scatter(X[i][0], X[i][1], s=7, c=colors[1], zorder = 0)
-for i,_ in enumerate(samples):
-    ax.scatter(samples[i][0], samples[i][1], s=15, c=colors[0], zorder = 2)
-
-# %% [markdown]
-# ---
-# Let us print the clusters now.
-
-# %%
-fig, ax = plt.subplots()
-sample_parents = np.arange(nb_samples)
-parent_found = np.full(len(samples), False, dtype=bool)
-for i,s1 in enumerate(samples):
-    parent_found[i] = True
-    for j,s2 in enumerate(samples):
-        if not parent_found[j]:
-            if np.all(np.abs(s1 - s2) < EPS*1000):
-                parent_found[j] = True
-                sample_parents[j] = i
-final_samples = list(set(sample_parents))
-
-def closest_sample(p, fs=final_samples, shifts = 1):
-    # we shift a few times so that the cluster is more relevant
-    p2 = np.copy(p)
-    for _ in range(shifts):
-        p2 = shift(p2)
-    distances = [dist(p2, samples[q]) for q in fs]
-    return (fs[np.argmin(distances)])
-
-parents = [closest_sample(p) for p in X]
+    def update_clusters(self, until_update=None, until_dist=None):
+        for i, p in enumerate(self.data[:until_update]):
+            self.find_cluster(i, p, until_dist, recollection = True)
         
-for i,x in enumerate(set(sample_parents)):
-    points = np.array([X[j] for j in range(len(X)) if parents[j]==x])
-    if (len(points)):
-        ax.scatter(points[:, 0], points[:, 1], s=7, c=colors[i%6])
+    def update_stdist(self, nb_seen, distance):
+        self.stdist = (max(1,nb_seen) * self.stdist + distance) / (nb_seen + 1)
 
 # %%
+ca = ContrastAgent()
+ca.feed_data(data)
+# ca.shuffle()
+ca.clusterize_online()
+ca.print_clusters()
+
+
+# %%
+# ca.update_clusters()
+# ca.print_clusters()
