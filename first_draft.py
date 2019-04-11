@@ -30,11 +30,11 @@
 # ## Imports
 
 # %%
+import time
 import csv
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
-import time
 import seaborn as sns
 import pandas as pd
 
@@ -49,10 +49,29 @@ NB_GROUPS = 5
 N = 500
 SIZE = 200
 DEV = 30
+
 colors = ['r', 'g', 'b', 'y', 'c', 'm']
 
+# stocks metadata as (DATASET_EXTENSION, DATASET_PATH, 
+#     \ DATASET_CLUSTER_COLUMN_INDEX, DATASET_DATA_COLUMNS_INDICES)
+metadata = {
+    'Cards': ('Cards', '.csv', 'data/', 1, (2, None)),
+    'Cards_truncated': ('Cards', '.csv', 'data/', 1, (2, 7))
+}
+
+SHOULD_LOAD_DATASET = 1 # 0 to generate, 1 to load
+# used if 0
+DUMMY_DATA_PATH = 'data/dummy_data.npy'
+DUMMY_CLUSTERS_TRUE_PATH = 'data/dummy_clusters.npy'
+# used if 1
+NAME = 'Cards'
+DATASET_NAME, DATASET_EXTENSION, DATASET_PATH, DATASET_CLUSTER_COLUMN_INDEX, \
+    DATASET_DATA_COLUMNS_INDICES= metadata[NAME]
+DATASET_PATH_FULL = DATASET_PATH + DATASET_NAME + DATASET_EXTENSION
+
+
 # %% [markdown]
-# ## Generate dataset
+# ## Helper functions
 
 # %%
 def generate_dataset(nb_features = NB_FEATURES, nb_groups = NB_GROUPS, n = N, size=SIZE, dev=DEV):
@@ -69,33 +88,49 @@ def generate_dataset(nb_features = NB_FEATURES, nb_groups = NB_GROUPS, n = N, si
         clusters_true[i] = gi
         for j in range(nb_features):
             data[i][j] = np.random.normal(loc = means[gi][j], scale = st_devs[gi][j])
-    np.save('dummy_data.npy', data)
-    np.save('dummy_clusters.npy', clusters_true)
+    np.save(DUMMY_DATA_PATH, data)
+    np.save(DUMMY_CLUSTERS_TRUE_PATH, clusters_true)
+    
+def distance(p, q, ord=2):
+    return(np.linalg.norm(p-q, ord))
 
+
+# %% [markdown]
+# ## Generate or load dataset
 
 # %%
-generate_dataset()
-
-data = np.load('dummy_data.npy')
-clusters_true = np.load('dummy_clusters.npy')
+if SHOULD_LOAD_DATASET:
+    start, end = DATASET_DATA_COLUMNS_INDICES
+    df1 = pd.read_csv(DATASET_PATH_FULL)
+    df1_np = df1.to_numpy(copy=True)
+    data = df1_np[:,start:end].astype('float')
+    clusters_true = df1_np[:,DATASET_CLUSTER_COLUMN_INDEX]
+else:
+    generate_dataset()
+    data = np.load(DUMMY_DATA_PATH)
+    clusters_true = np.load(DUMMY_CLUSTERS_TRUE_PATH)
+    
+assert data is not None, 'data is None'
+assert clusters_true is not None, 'clusters_true is None'
 
 # %%
-columns = ["d" + str(i) for i in range(data.shape[1])] + ['true clusters']
+# print(data)
+# print(clusters_true)
+
+# %% [markdown]
+# ## Preview dataset
+
+# %%
+columns = ["d" + str(i) for i in range(data.shape[1])] + ['true cluster']
 df = pd.DataFrame(np.hstack((data,np.reshape([clusters_true],(data.shape[0],1)))), columns=columns)
-sns.pairplot(df, kind="scatter", hue='true clusters', vars=columns[:-1])
+true_data_plot = sns.pairplot(df, kind="scatter", hue='true cluster', vars=columns[:-1])
+true_data_plot.savefig(DATASET_PATH + DATASET_NAME + '_true.png')
 
-# f1 = data[:, 0]
-# f2 = data[:, 1]
-# X = np.array(list(zip(f1, f2)))
-# plt.plot(f1, f2, 'ro')
 
 # %% [markdown]
 # ## The agent
 
 # %%
-def distance(p, q, ord=2):
-    return(np.linalg.norm(p-q, ord))
-
 class ContrastAgent(object):
     def __init__(self, rigged_shuffle=False, verbose=False):
         self.clusters = np.array([]) # clusters[i] == j means that point i belongs to cluster j
@@ -117,8 +152,9 @@ class ContrastAgent(object):
             self.new_cluster(0)
             self.one_more_seen()
         for i, p in enumerate(self.data[self.nb_seen:], start=self.nb_seen):
-            self.find_cluster(i, p, i)
-            self.one_more_seen()
+            allZeros = self.find_cluster(i, p, i)
+            if not allZeros:
+                self.one_more_seen()
 
     def get_cluster_points(self, i):
         return data[np.argwhere(self.clusters == i)]
@@ -156,23 +192,26 @@ class ContrastAgent(object):
             self.clusters = new_clusters_all
 
     def find_cluster(self, i, p, until=None, recollection=False):
-        distances = np.array([distance(p,q) for q in self.data[:until] if not np.all(p == q)])
-        dist_min = np.min(distances)
-        if not recollection:
-            self.update_stdist(self.nb_seen, dist_min)
+        distances = np.array([distance(p,q) for q in self.data[:until]])
+        allZeros = np.all(distances == 0)
+        dist_min = np.min(np.trim_zeros(distances)) if not allZeros else 0
         closest = np.argmin(distances)
-        if dist_min > self.sensitiveness_find_cluster * self.stdist:
-#                 if self.verbose:
-#                     print("new cluster
+        if dist_min > self.sensitiveness_find_cluster * self.stdist and not 0 in distances:
+            if self.verbose:
+                print("{} -> new cluster".format(i))
             if self.clusters[i] == -1 or not self.cluster_sizes[int(self.clusters[i])] == 1:
-                # if p not already seen or is not already alone
+#                 if p not already seen or is not already alone
                 self.new_cluster(i)
         else:
-#                 if self.verbose:
-#                     print("-> cluster of {}".format(closest))
+            if self.verbose:
+                print("{} -> cluster of {}".format(i, closest))
             self.clusters[i] = self.clusters[closest]
-            self.update_stdists_per_cluster(int(self.clusters[i]), p)
+            if not allZeros:
+                self.update_stdists_per_cluster(int(self.clusters[i]), p)
             self.cluster_sizes[int(self.clusters[i])] += 1
+        if not recollection and not allZeros:
+            self.update_stdist(self.nb_seen, dist_min)
+        return allZeros
             
     def new_cluster(self, p_index):
         self.clusters[p_index] = self.nb_clusters
@@ -191,19 +230,23 @@ class ContrastAgent(object):
 #                 plt.plot(points[:,0], points[:,1], 'o', color=self.colors[k])
                 
     def print_clusters(self):
-        columns = ["d" + str(i) for i in range(self.data.shape[1])] + ['cluster']
+        columns = ["d" + str(i) for i in range(self.data.shape[1])] + ['affected cluster']
         df_1 = pd.DataFrame(np.hstack((self.data,np.reshape([self.clusters],(self.data.shape[0],1)))),  columns=columns)
-        sns.pairplot(df_1, kind="scatter", hue="cluster", vars=columns[:-1])
-                
+        agent_plot = sns.pairplot(df_1, kind="scatter", hue="affected cluster", vars=columns[:-1])
+        agent_plot.savefig(DATASET_PATH + DATASET_NAME + '_agent.png')    
+            
     def shuffle(self, data_to_shuffle):
         np.random.shuffle(data_to_shuffle)
 
-    def update_clusters(self, until_update=None, until_dist=None):
+    def update_clusters(self, until_update=None, until_dist=None, recollection = True):
         for i, p in enumerate(self.data[:until_update]):
-            self.find_cluster(i, p, until_dist, recollection = False)
+            self.find_cluster(i, p, until_dist, recollection = recollection)
         
     def update_stdist(self, nb_seen, distance):
-        self.stdist = (max(1,nb_seen) * self.stdist + distance) / (nb_seen + 1)
+        old_dist = self.stdist
+        self.stdist = (max(1,nb_seen-1) * self.stdist + distance) / (nb_seen)
+        if self.verbose:
+            print('distance = {}, self.stdist = {} -> {}'.format(distance, old_dist, self.stdist))
 
     def update_stdists_per_cluster(self, i, p):
         old_dist = self.stdists_per_cluster[i]
@@ -217,7 +260,7 @@ class ContrastAgent(object):
         else:
             cluster_points_rd = self.get_cluster_points(i)[:,zero_dims]
             p_rd = p[zero_dims]
-        array_dists = np.array([distance(p,q) for q in cluster_points_rd if not np.all(p == q)])
+        array_dists = np.array([distance(p,q) for q in cluster_points_rd])
 #         print(relevant_dims, inf_dims, zero_dims)
 #         print(array_dists)
         dist_p = np.min(array_dists)
@@ -225,10 +268,9 @@ class ContrastAgent(object):
         self.stdists_per_cluster[i] = (old_dist * csize + dist_p) / (csize + 1)
 
 # %%
-ca = ContrastAgent()
-for i in range(len(data)):
-    ca.feed_data(data[[i]], shuffle=False)
-    ca.clusterize_online()
+ca = ContrastAgent(verbose=False)
+ca.feed_data(data, shuffle=True)
+ca.clusterize_online()
 print("Final stdist: {}".format(ca.stdist))
 print("All points in a cluster? {}".format(-1 not in ca.clusters))
 ca.print_clusters()
@@ -238,9 +280,6 @@ ca.print_clusters()
 # ca.print_clusters()
 
 # %%
-ca.stdists_per_cluster
-
-# %%
-ca.cluster_sizes
+ca.clusters
 
 # %%
