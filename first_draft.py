@@ -48,6 +48,8 @@ from scipy.stats import chi2
 from scipy.stats import special_ortho_group
 from scipy.spatial.distance import mahalanobis
 from sklearn import metrics
+from utils import plot_confusion_matrix
+import collections, functools, itertools
 
 np.random.seed(1)
 
@@ -56,10 +58,10 @@ np.random.seed(1)
 
 # %%
 NB_FEATURES = 5
-NB_GROUPS = 5
-N = 500
+NB_GROUPS = 10
+N = 200
 DOMAIN_LENGTH = 200
-DEV_MAX = 30
+DEV_MAX = 20
 
 COLORS = ['r', 'g', 'b', 'y', 'c', 'm']
 
@@ -70,15 +72,16 @@ METADATA = {
     'Cards_truncated': ('Cards', '.csv', 'data/', 1, (2, 7))
 }
 
-SHOULD_LOAD_DATASET = 0  # 0 to generate, 1 to load
-# used if 0
-DUMMY_DATA_PATH = 'data/dummy_data.npy'
-DUMMY_CLUSTERS_TRUE_PATH = 'data/dummy_clusters.npy'
-# used if 1
-NAME = 'Cards'
-DATASET_NAME, DATASET_EXTENSION, DATASET_PATH, DATASET_CLUSTER_COLUMN_INDEX, \
-    DATASET_DATA_COLUMNS_INDICES = METADATA[NAME]
-DATASET_PATH_FULL = DATASET_PATH + DATASET_NAME + DATASET_EXTENSION
+SHOULD_LOAD_DATASET = 1  # 0 to generate, 1 to load
+if SHOULD_LOAD_DATASET:
+    NAME = 'Cards'
+    DATASET_NAME, DATASET_EXTENSION, DATASET_PATH, \
+        DATASET_CLUSTER_COLUMN_INDEX, \
+        DATASET_DATA_COLUMNS_INDICES = METADATA[NAME]
+    DATASET_PATH_FULL = DATASET_PATH + DATASET_NAME + DATASET_EXTENSION
+else:
+    DATASET_PATH = 'data/'
+    DATASET_NAME = 'dummy'
 
 
 # %% [markdown]
@@ -118,15 +121,15 @@ def generate_cluster(n_cluster, nb_features=NB_FEATURES, d=DOMAIN_LENGTH,
 
 def generate_dataset(nb_groups=NB_GROUPS, n=N, nb_features=NB_FEATURES,
                      d=DOMAIN_LENGTH, dev_max=DEV_MAX):
-    group_sizes = np.random.random(10)
-    group_sizes *= 100 / np.sum(group_sizes)
+    group_sizes = np.random.random(nb_groups)
+    group_sizes *= n / np.sum(group_sizes)
     group_sizes = np.trim_zeros(np.round(group_sizes)).astype(int)
     data = [generate_cluster(n_cluster) for n_cluster in group_sizes]
     data = np.vstack(data)
     clusters_true = np.concatenate([n_cluster * [i] for i, n_cluster in
                                     enumerate(group_sizes)])
-    np.save(DUMMY_DATA_PATH, data)
-    np.save(DUMMY_CLUSTERS_TRUE_PATH, clusters_true)
+    np.save(DATASET_PATH + DATASET_NAME + '_data.npy', data)
+    np.save(DATASET_PATH + DATASET_NAME + '_clusters_true.npy', clusters_true)
 
 
 # def old_generate_dataset(nb_groups=NB_GROUPS, n=N, nb_features=NB_FEATURES,
@@ -190,8 +193,9 @@ if SHOULD_LOAD_DATASET:
     clusters_true = df1_np[:, DATASET_CLUSTER_COLUMN_INDEX]
 else:
     generate_dataset()
-    data = np.load(DUMMY_DATA_PATH)
-    clusters_true = np.load(DUMMY_CLUSTERS_TRUE_PATH)
+    data = np.load(DATASET_PATH + DATASET_NAME + '_data.npy')
+    clusters_true = np.load(DATASET_PATH + DATASET_NAME +
+                            '_clusters_true.npy').astype(int)
 
 assert data is not None, 'data is None'
 assert clusters_true is not None, 'clusters_true is None'
@@ -217,7 +221,8 @@ true_data_plot.savefig(DATASET_PATH + DATASET_NAME + '_true.png')
 
 # %%
 class ContrastAgent(object):
-    def __init__(self, sensitivenesses=[1, 10, 0.1], verbose=False):
+    def __init__(self, sensitivenesses=[1, 10, 0.1], shuffleToggle=False,
+                 verbose=False):
 
         # --- user-defined parameters ---
         self.sensitiveness_find_cluster = sensitivenesses[0]
@@ -229,6 +234,7 @@ class ContrastAgent(object):
         self.sensitiveness_zero_dims = sensitivenesses[2]
         # sensitiveness to determine if a dimension is too concentrated to be
         # relevant for the cluster
+        self.shuffleToggle = shuffleToggle
         self.verbose = verbose
 
         # --- other parameters ---
@@ -239,6 +245,7 @@ class ContrastAgent(object):
         self.first_time = True  # is True if nb
         self.nb_clusters = 0
         self.nb_seen = 0
+        self.permutation = None
         self.stdist = 0
         self.stdists_per_cluster = []
 
@@ -252,11 +259,11 @@ class ContrastAgent(object):
             if not allZeros:
                 self.one_more_seen()
 
-    def feed_data(self, d, shuffle=False):
+    def feed_data(self, d):
         """Adds data to the agent's memory"""
         data = np.copy(d)
-        if shuffle:
-            np.random.shuffle(data)
+        if self.shuffleToggle:
+            data = self.shuffle(data)
         if self.nb_clusters == 0:
             self.data = np.copy(data)
             self.clusters = np.zeros(len(data), dtype=int)
@@ -264,7 +271,7 @@ class ContrastAgent(object):
         else:
             new_data = np.vstack((self.data, np.copy(data)))
             self.data = new_data
-            new_clusters = np.zeros(len(data))
+            new_clusters = np.zeros(len(data), dtype=int)
             new_clusters.fill(-1)
             new_clusters_all = np.hstack((self.clusters, new_clusters))
             self.clusters = new_clusters_all
@@ -335,7 +342,14 @@ class ContrastAgent(object):
         pass
 
     def shuffle(self, data_to_shuffle):
-        np.random.shuffle(data_to_shuffle)
+        new_permutation = np.random.permutation(len(data_to_shuffle))
+        if self.permutation is None:
+            self.permutation = new_permutation
+        else:
+            new_permutation2 = new_permutation + len(self.permutation)
+            self.permutation = np.concatenate([self.permutation,
+                                               new_permutation2])
+        return(data_to_shuffle[new_permutation])
 
     def update_clusters(self, until_update=None, until_dist=None,
                         recollection=True):
@@ -371,9 +385,62 @@ class ContrastAgent(object):
 
 
 # %%
-ca = ContrastAgent(verbose=False)
-ca.feed_data(data, shuffle=True)
+ca = ContrastAgent(sensitivenesses=[1.25, 10, 0.1], shuffleToggle=True,
+                   verbose=False)
+ca.feed_data(data)
 ca.clusterize_online()
 print("Final stdist: {}".format(ca.stdist))
 print("All points in a cluster? {}".format(-1 not in ca.clusters))
 ca.print_clusters()
+
+# %% [markdown]
+# ## Performance metrics
+
+# %%
+if clusters_true is not None:
+    # clusters_true2 will contain ids instead of labels
+    ids = collections.defaultdict(functools.partial(next, itertools.count()))
+    clusters_true2 = np.array([ids[label] for label in clusters_true])
+    if ca.shuffleToggle:
+        clusters_true2 = clusters_true2[ca.permutation]
+    print("Metrics involving ground truth")
+    print("Adjusted Rand Index: {}".format(
+        metrics.adjusted_rand_score(clusters_true2, ca.clusters)))
+    print("Adjusted Mutual Information score: {}".format(
+        metrics.adjusted_mutual_info_score(clusters_true2, ca.clusters)))
+    print("Homogeneity: {}".format(
+        metrics.homogeneity_score(clusters_true2, ca.clusters)))
+    print("Completeness: {}".format(
+        metrics.completeness_score(clusters_true2, ca.clusters)))
+    print("V-measure score: {}".format(
+        metrics.v_measure_score(clusters_true2, ca.clusters)))
+    print("Fowlkes-Mallows score: {}".format(
+        metrics.fowlkes_mallows_score(clusters_true2, ca.clusters)))
+    print()
+    
+print("Metrics not involving ground truth")
+if clusters_true is not None:
+    print("Silhouette score (original): {}".format(
+        metrics.silhouette_score(data, clusters_true)))
+print("Silhouette score (agent): {}".format(
+    metrics.silhouette_score(ca.data, ca.clusters)))
+if clusters_true is not None:
+    print("Calinski-Harabaz score (original): {}".format(
+        metrics.calinski_harabaz_score(data, clusters_true)))
+print("Calinski-Harabaz score (agent): {}".format(
+    metrics.calinski_harabaz_score(ca.data, ca.clusters)))
+if clusters_true is not None:
+    print("Davies-Bouldin score (original): {}".format(
+        metrics.davies_bouldin_score(data, clusters_true)))
+print("Davies-Bouldin score (agent): {}".format(
+    metrics.davies_bouldin_score(ca.data, ca.clusters)))
+
+if clusters_true is not None:
+    print()
+    class_names = np.array([str(i) for i in range(1+np.max(
+                                np.concatenate([clusters_true2, ca.clusters])))])
+    plot_confusion_matrix(clusters_true2, ca.clusters, classes=class_names,
+                      normalize=True, title='Normalized confusion matrix',
+                      path=DATASET_PATH + DATASET_NAME)
+
+# %%
