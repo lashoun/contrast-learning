@@ -26,12 +26,12 @@
 # - Inverse law when seeing duplicates
 # - Implement context
 # - Compare stdevs and distances
-# - Clustering validity checking methods
+# - ✔ Clustering validity checking methods
 # - Recollection: random updates vs complete updates?
 #
 # ## Not to do
-# - Implement a tree-like structure (not relevant if we update only one
-#   outlier point we saw early)
+# - Implement a tree-like structure for clusters (not relevant if we update
+#   only one outlier point we saw early)
 
 # %% [markdown]
 # ## Imports
@@ -39,9 +39,9 @@
 # %%
 # import time
 # import csv
-import numpy as np
 # import matplotlib.pyplot as plt
 # import matplotlib.cm as cm
+import numpy as np
 import seaborn as sns
 import pandas as pd
 from scipy.stats import chi2
@@ -49,12 +49,14 @@ from scipy.stats import special_ortho_group
 from scipy.spatial.distance import mahalanobis
 from sklearn import metrics
 from utils import plot_confusion_matrix
-import collections, functools, itertools
+import collections
+import functools
+import itertools
 
 np.random.seed(1)
 
 # %% [markdown]
-# ## Global variables
+# ## Global variables and functions
 
 # %%
 NB_FEATURES = 5
@@ -84,10 +86,6 @@ else:
     DATASET_NAME = 'dummy'
 
 
-# %% [markdown]
-# ## Helper functions
-
-# %%
 def generate_cluster(n_cluster, nb_features=NB_FEATURES, d=DOMAIN_LENGTH,
                      dev_max=DEV_MAX, method='byhand'):
     """
@@ -132,28 +130,6 @@ def generate_dataset(nb_groups=NB_GROUPS, n=N, nb_features=NB_FEATURES,
     np.save(DATASET_PATH + DATASET_NAME + '_clusters_true.npy', clusters_true)
 
 
-# def old_generate_dataset(nb_groups=NB_GROUPS, n=N, nb_features=NB_FEATURES,
-#                          d=DOMAIN_LENGTH, dev_max=DEV_MAX):
-#     clusters_true = np.zeros(n)
-#     means = np.zeros((nb_groups,
-#                       nb_features))  # holds the mean of each group
-#     st_devs = np.zeros((nb_groups, nb_features))
-#     # holds the st_devs of each group
-#     for i in range(nb_groups):
-#         for j in range(nb_features):
-#             means[i][j] = np.random.randint(-d, d)
-#             st_devs[i][j] = dev_max*np.random.random()
-#     data = np.zeros((n, nb_features))
-#     for i in range(n):
-#         gi = np.random.randint(0, nb_groups)
-#         clusters_true[i] = gi
-#         for j in range(nb_features):
-#             data[i][j] = np.random.normal(loc=means[gi][j],
-#                                           scale=st_devs[gi][j])
-#     np.save(DUMMY_DATA_PATH, data)
-#     np.save(DUMMY_CLUSTERS_TRUE_PATH, clusters_true)
-
-
 def distance(p, q, ord=2):
     return(np.linalg.norm(p-q, ord))
 
@@ -179,41 +155,6 @@ def get_outlier_ratio(p, cluster_points, method='maha', alpha=0.95):
         d = mahalanobis(p, mu, np.linalg.inv(sigma))
         ratio = d / threshold
         return ratio
-
-
-# %% [markdown]
-# ## Generate or load dataset
-
-# %%
-if SHOULD_LOAD_DATASET:
-    start, end = DATASET_DATA_COLUMNS_INDICES
-    df1 = pd.read_csv(DATASET_PATH_FULL)
-    df1_np = df1.to_numpy(copy=True)
-    data = df1_np[:, start:end].astype('float')
-    clusters_true = df1_np[:, DATASET_CLUSTER_COLUMN_INDEX]
-else:
-    generate_dataset()
-    data = np.load(DATASET_PATH + DATASET_NAME + '_data.npy')
-    clusters_true = np.load(DATASET_PATH + DATASET_NAME +
-                            '_clusters_true.npy').astype(int)
-
-assert data is not None, 'data is None'
-assert clusters_true is not None, 'clusters_true is None'
-
-# print(data)
-# print(clusters_true)
-
-# %% [markdown]
-# ## Preview dataset
-
-# %%
-columns = ["d" + str(i) for i in range(data.shape[1])] + ['true cluster']
-df = pd.DataFrame(np.hstack((data, np.reshape([clusters_true],
-                                              (data.shape[0], 1)))),
-                  columns=columns)
-true_data_plot = sns.pairplot(df, kind="scatter", hue='true cluster',
-                              vars=columns[:-1])
-true_data_plot.savefig(DATASET_PATH + DATASET_NAME + '_true.png')
 
 
 # %% [markdown]
@@ -261,15 +202,15 @@ class ContrastAgent(object):
 
     def feed_data(self, d):
         """Adds data to the agent's memory"""
-        data = np.copy(d)
+        d2 = np.copy(d)
         if self.shuffleToggle:
-            data = self.shuffle(data)
+            d2 = self.shuffle(d2)
         if self.nb_clusters == 0:
-            self.data = np.copy(data)
-            self.clusters = np.zeros(len(data), dtype=int)
+            self.data = np.copy(d2)
+            self.clusters = np.zeros(len(d2), dtype=int)
             self.clusters.fill(-1)
         else:
-            new_data = np.vstack((self.data, np.copy(data)))
+            new_data = np.vstack((self.data, d2))
             self.data = new_data
             new_clusters = np.zeros(len(data), dtype=int)
             new_clusters.fill(-1)
@@ -316,7 +257,7 @@ class ContrastAgent(object):
         return relevant_dims, inf_dims, zero_dims
 
     def get_cluster_points(self, i):
-        return data[np.argwhere(self.clusters == i)]
+        return self.data[np.argwhere(self.clusters == i)]
 
     def new_cluster(self, p_index):
         self.clusters[p_index] = self.nb_clusters
@@ -342,6 +283,8 @@ class ContrastAgent(object):
         pass
 
     def shuffle(self, data_to_shuffle):
+        assert self.shuffleToggle, \
+            "agent: shuffle method called but shuffleToggle is False"
         new_permutation = np.random.permutation(len(data_to_shuffle))
         if self.permutation is None:
             self.permutation = new_permutation
@@ -384,6 +327,40 @@ class ContrastAgent(object):
         self.stdists_per_cluster[i] = (old_dist * csize + dist_p) / (csize + 1)
 
 
+# %% [markdown]
+# ## Generate or load dataset
+
+# %%
+if SHOULD_LOAD_DATASET:
+    start, end = DATASET_DATA_COLUMNS_INDICES
+    df1 = pd.read_csv(DATASET_PATH_FULL)
+    df1_np = df1.to_numpy(copy=True)
+    data = df1_np[:, start:end].astype('float')
+    clusters_true = df1_np[:, DATASET_CLUSTER_COLUMN_INDEX]
+else:
+    generate_dataset()
+    data = np.load(DATASET_PATH + DATASET_NAME + '_data.npy')
+    clusters_true = np.load(DATASET_PATH + DATASET_NAME +
+                            '_clusters_true.npy').astype(int)
+
+assert data is not None, 'data is None'
+assert clusters_true is not None, 'clusters_true is None'
+
+# print(data)
+# print(clusters_true)
+
+# %% [markdown]
+# ## Preview dataset
+
+# %%
+columns = ["d" + str(i) for i in range(data.shape[1])] + ['true cluster']
+df = pd.DataFrame(np.hstack((data, np.reshape([clusters_true],
+                                              (data.shape[0], 1)))),
+                  columns=columns)
+true_data_plot = sns.pairplot(df, kind="scatter", hue='true cluster',
+                              vars=columns[:-1])
+true_data_plot.savefig(DATASET_PATH + DATASET_NAME + '_true.png')
+
 # %%
 ca = ContrastAgent(sensitivenesses=[1.25, 10, 0.1], shuffleToggle=True,
                    verbose=False)
@@ -393,54 +370,66 @@ print("Final stdist: {}".format(ca.stdist))
 print("All points in a cluster? {}".format(-1 not in ca.clusters))
 ca.print_clusters()
 
+
 # %% [markdown]
 # ## Performance metrics
 
 # %%
-if clusters_true is not None:
-    # clusters_true2 will contain ids instead of labels
-    ids = collections.defaultdict(functools.partial(next, itertools.count()))
-    clusters_true2 = np.array([ids[label] for label in clusters_true])
-    if ca.shuffleToggle:
-        clusters_true2 = clusters_true2[ca.permutation]
-    print("Metrics involving ground truth")
-    print("Adjusted Rand Index: {}".format(
-        metrics.adjusted_rand_score(clusters_true2, ca.clusters)))
-    print("Adjusted Mutual Information score: {}".format(
-        metrics.adjusted_mutual_info_score(clusters_true2, ca.clusters)))
-    print("Homogeneity: {}".format(
-        metrics.homogeneity_score(clusters_true2, ca.clusters)))
-    print("Completeness: {}".format(
-        metrics.completeness_score(clusters_true2, ca.clusters)))
-    print("V-measure score: {}".format(
-        metrics.v_measure_score(clusters_true2, ca.clusters)))
-    print("Fowlkes-Mallows score: {}".format(
-        metrics.fowlkes_mallows_score(clusters_true2, ca.clusters)))
-    print()
-    
-print("Metrics not involving ground truth")
-if clusters_true is not None:
-    print("Silhouette score (original): {}".format(
-        metrics.silhouette_score(data, clusters_true)))
-print("Silhouette score (agent): {}".format(
-    metrics.silhouette_score(ca.data, ca.clusters)))
-if clusters_true is not None:
-    print("Calinski-Harabaz score (original): {}".format(
-        metrics.calinski_harabaz_score(data, clusters_true)))
-print("Calinski-Harabaz score (agent): {}".format(
-    metrics.calinski_harabaz_score(ca.data, ca.clusters)))
-if clusters_true is not None:
-    print("Davies-Bouldin score (original): {}".format(
-        metrics.davies_bouldin_score(data, clusters_true)))
-print("Davies-Bouldin score (agent): {}".format(
-    metrics.davies_bouldin_score(ca.data, ca.clusters)))
+def print_metrics():
+    if clusters_true is not None:
+        # clusters_true2 will contain ids instead of labels
+        ids = collections.defaultdict(functools.partial(next,
+                                                        itertools.count()))
+        clusters_true2 = np.array([ids[label] for label in clusters_true])
+        if ca.shuffleToggle:
+            clusters_true2 = clusters_true2[ca.permutation]
+        print("Metrics involving ground truth")
+        print("Adjusted Rand Index: {}".format(
+            metrics.adjusted_rand_score(clusters_true2, ca.clusters)))
+        print("Adjusted Mutual Information score: {}".format(
+            metrics.adjusted_mutual_info_score(clusters_true2, ca.clusters)))
+        print("Homogeneity: {}".format(
+            metrics.homogeneity_score(clusters_true2, ca.clusters)))
+        print("Completeness: {}".format(
+            metrics.completeness_score(clusters_true2, ca.clusters)))
+        print("V-measure score: {}".format(
+            metrics.v_measure_score(clusters_true2, ca.clusters)))
+        print("Fowlkes-Mallows score: {}".format(
+            metrics.fowlkes_mallows_score(clusters_true2, ca.clusters)))
+        print()
 
-if clusters_true is not None:
-    print()
-    class_names = np.array([str(i) for i in range(1+np.max(
-                                np.concatenate([clusters_true2, ca.clusters])))])
-    plot_confusion_matrix(clusters_true2, ca.clusters, classes=class_names,
-                      normalize=True, title='Normalized confusion matrix',
-                      path=DATASET_PATH + DATASET_NAME)
+    print("Metrics not involving ground truth")
+    if clusters_true is not None:
+        print("Silhouette score (original): {}".format(
+            metrics.silhouette_score(data, clusters_true)))
+    print("Silhouette score (agent): {}".format(
+        metrics.silhouette_score(ca.data, ca.clusters)))
+    if clusters_true is not None:
+        print("Calinski-Harabaz score (original): {}".format(
+            metrics.calinski_harabaz_score(data, clusters_true)))
+    print("Calinski-Harabaz score (agent): {}".format(
+        metrics.calinski_harabaz_score(ca.data, ca.clusters)))
+    if clusters_true is not None:
+        print("Davies-Bouldin score (original): {}".format(
+            metrics.davies_bouldin_score(data, clusters_true)))
+    print("Davies-Bouldin score (agent): {}".format(
+        metrics.davies_bouldin_score(ca.data, ca.clusters)))
+
+    if clusters_true is not None:
+        print()
+        class_names = np.array([str(i) for i in range(1+np.max(
+            np.concatenate([clusters_true2, ca.clusters])))])
+        plot_confusion_matrix(
+            clusters_true2, ca.clusters, classes=class_names,
+            normalize=True, title='Normalized confusion matrix',
+            path=DATASET_PATH + DATASET_NAME)
+
+
+# %%
+print_metrics()
+
+# %%
+ca.update_clusters()
+print_metrics()
 
 # %%
