@@ -140,7 +140,7 @@ def generate_dataset(nb_groups=NB_GROUPS, n=N, nb_features=NB_FEATURES,
 class ContrastAgent(object):
     def __init__(self,
                  method_find='byhand',
-                 method_multivariate='maha',
+                 method_multivariate='mmcd',
                  method_univariate='mad',
                  alpha=0.95,
                  ord=2,
@@ -226,8 +226,6 @@ class ContrastAgent(object):
             global_ratio = self.get_outlier_ratio(p, self.data)
             if global_ratio > 1:
                 self.new_cluster(i)
-                if self.verbose:
-                    print("{} -> new cluster".format(i))
             else:
                 cluster_ratios = []
                 for j, size in enumerate(self.cluster_sizes):
@@ -253,12 +251,7 @@ class ContrastAgent(object):
             closest = np.argmin(distances)
             if dist_min > self.sensitiveness_find_cluster * self.stdist and \
                     0 not in distances:
-                if self.verbose:
-                    print("{} -> new cluster".format(i))
-                if self.clusters[i] == -1 or \
-                        not self.cluster_sizes[self.clusters[i]] == 1:
-                    # if p not already seen or is not already alone
-                    self.new_cluster(i)
+                self.new_cluster(i)
             else:
                 if self.verbose:
                     print("{} -> cluster of {}".format(i, closest))
@@ -278,16 +271,8 @@ class ContrastAgent(object):
             cluster_bad_ratios_sum = []
             for i in self.clusters:
                 if i != -1:
-                    relevant_dims = 0
-                    good_ratios_sum = 0
-                    bad_ratios_sum = 0
-                    ratios = self.get_outlier_ratio_per_dimension(i, p)
-                    for r in ratios:
-                        if r < 1:
-                            relevant_dims += 1
-                            good_ratios_sum += r
-                        else:
-                            bad_ratios_sum += r
+                    relevant_dims, good_ratios_sum, bad_ratios_sum, ratios = \
+                            self.get_cluster_analysis(i, p)
                     cluster_indexes.append(i)
                     cluster_dims.append(relevant_dims)
                     cluster_good_ratios_sum.append(good_ratios_sum)
@@ -305,16 +290,36 @@ class ContrastAgent(object):
                        for i in ind[0: min(len(ind), 3)]])
             if cluster_dims[ind[0]] == 0 or \
                     self.nb_clusters == 1:
-                if self.clusters[p_i] == -1 or \
-                        not self.cluster_sizes[self.clusters[p_i]] == 1:
-                    if self.verbose:
-                        print("{} -> new cluster".format(p_i))
-                    self.new_cluster(p_i)
+                self.new_cluster(p_i)
             else:
-                if self.verbose:
-                    print("{} -> cluster of {}".format(p_i, closest))
-                self.clusters[p_i] = self.clusters[closest]
-                self.cluster_sizes[self.clusters[p_i]] += 1
+                closest_second = cluster_indexes[ind[1]]
+                cluster_fusion = np.vstack([
+                    self.get_cluster_points(closest),
+                    self.get_cluster_points(closest_second)
+                    ])
+                ratio_fusion = self.get_outlier_ratio(
+                        p, cluster_fusion, alpha=self.alpha,
+                        method=self.method_multivariate)
+                if ratio_fusion > 10:
+                    self.new_cluster(p_i)
+                else:
+                    if self.verbose:
+                        print("{} -> cluster of {}".format(p_i, closest))
+                    self.clusters[p_i] = self.clusters[closest]
+                    self.cluster_sizes[self.clusters[p_i]] += 1
+
+    def get_cluster_analysis(self, i, p, custom_points=[]):
+        relevant_dims = 0
+        good_ratios_sum = 0
+        bad_ratios_sum = 0
+        ratios = self.get_outlier_ratio_per_dimension(i, p, custom_points)
+        for r in ratios:
+            if r < 1:
+                relevant_dims += 1
+                good_ratios_sum += r
+            else:
+                bad_ratios_sum += r
+        return(relevant_dims, good_ratios_sum, bad_ratios_sum, ratios)
 
     def get_cluster_relevant_dimensions(self, i):
         """ return (relevant_dims, inf_dims, zero_dims) """
@@ -343,8 +348,10 @@ class ContrastAgent(object):
             nb_obs[j] = len(np.unique(cluster_points[:, j]))
         return nb_obs
 
-    def get_outlier_ratio_per_dimension(self, i, p):
+    def get_outlier_ratio_per_dimension(self, i, p, custom_points=[]):
         cluster_points = self.get_cluster_points(i)
+        if len(custom_points) > 0:
+            cluster_points = custom_points
         d = cluster_points.shape[1]
         if d == 1:
             np.hstack(cluster_points, np.mean(cluster_points,
@@ -352,11 +359,12 @@ class ContrastAgent(object):
             # arbitrary choice: we add the mean to get a more relevant result
         ratios = np.zeros(d)
         for j in range(d):
-            ratios[j] = self.get_outlier_ratio_univariate(p[j],
-                                                          cluster_points[:, j])
+            ratios[j] = self.get_outlier_ratio_univariate(
+                    p[j], cluster_points[:, j], method=self.method_univariate)
         return ratios
 
-    def get_outlier_ratio(self, p, cluster_points_without_p):
+    def get_outlier_ratio(self, p, cluster_points_without_p, alpha=0.95,
+                          method='maha', h=0.75, m=5):
         """
         The 'method' argument can be either of the following:
         - 'maha': Mahalanobis distance, generalization of the distance to
@@ -364,16 +372,38 @@ class ContrastAgent(object):
                   multivariate data
         - 'cook': TODO
         - 'mmcd': TODO
+
+        If return value > 1, consider p an outlier
         """
         eps = np.mean(cluster_points_without_p[0]) * 1e-6
         # used to avoid singular matrices
         cluster_points = np.vstack([p, cluster_points_without_p])
-        threshold = chi2.isf(1-self.alpha, len(p))
-        method = self.method_multivariate
+        n = len(cluster_points)
+        threshold = chi2.isf(1-alpha, len(p))
         if method == 'cook':
             raise NotImplementedError("'cook' method not yet implemented")
         elif method == 'mmcd':
-            raise NotImplementedError("'mmcd' method not yet implemented")
+            sample_size = int(h * n)
+            permutations = np.zeros((m, sample_size), dtype=int)
+            determinants = np.zeros(m)
+            for i in range(m):
+                permutations[i] = np.random.permutation(n)[:sample_size]
+                for j in range(m):
+                    sample = cluster_points[permutations[i]]
+                    sigma = np.cov(sample, rowvar=False) + \
+                        eps * np.eye(len(p))
+                    mu = np.mean(sample, axis=0)
+                    distances = [mahalanobis(point, mu, np.linalg.inv(sigma))
+                                 for point in cluster_points]
+                    permutations[i] = np.argsort(distances)[:sample_size]
+                determinants[i] = np.linalg.det(sigma)
+            best = np.argmin(determinants)
+            sample = cluster_points[permutations[best]]
+            sigma = np.cov(sample, rowvar=False) + eps * np.eye(len(p))
+            mu = np.mean(sample, axis=0)
+            d = mahalanobis(p, mu, np.linalg.inv(sigma))
+            ratio = d / threshold
+            return ratio
         else:
             if method != 'maha':
                 print("Unknown method, using Mahalanobis distance")
@@ -383,7 +413,8 @@ class ContrastAgent(object):
             ratio = d / threshold
             return ratio
 
-    def get_outlier_ratio_univariate(self, p, cluster_points_without_p):
+    def get_outlier_ratio_univariate(self, p, cluster_points_without_p,
+                                     B=1.4826, threshold=3, method='mad'):
         """
         The 'method' argument can be one of the following:
         - 'mean': mean +- three stdevs
@@ -391,9 +422,6 @@ class ContrastAgent(object):
 
         If the value returned is > 1, consider p an outlier.
         """
-        B = 1.4826
-        threshold = 3
-        method = self.method_univariate
         cluster_points = np.hstack([cluster_points_without_p, [p]])
         if method == 'mean':
             raise NotImplementedError("'mean' method not yet implemented")
@@ -410,11 +438,15 @@ class ContrastAgent(object):
             else:
                 return (np.abs(p-m)/(threshold*mad))
 
-    def new_cluster(self, p_index):
-        self.clusters[p_index] = self.nb_clusters
-        self.nb_clusters += 1
-        self.cluster_sizes.append(1)
-        self.stdists_per_cluster.append(0)
+    def new_cluster(self, p_i):
+        if self.clusters[p_i] == -1 or \
+                not self.cluster_sizes[self.clusters[p_i]] == 1:
+            if self.verbose:
+                print("{} -> new cluster".format(p_i))
+            self.clusters[p_i] = self.nb_clusters
+            self.nb_clusters += 1
+            self.cluster_sizes.append(1)
+            self.stdists_per_cluster.append(0)
 
     def one_more_seen(self):
         self.nb_seen += 1
@@ -518,7 +550,7 @@ true_data_plot.savefig(DATASET_PATH + DATASET_NAME + '_true.png')
 
 # %%
 ca = ContrastAgent(method_find='byhand', sensitivenesses=[1.25, 10, 0.1],
-                   shuffleToggle=True, verbose=True)
+                   shuffleToggle=False, verbose=True)
 ca.feed_data(data)
 ca.clusterize_online()
 if ca.method_find == 'byhand-naive':
@@ -587,3 +619,5 @@ print_metrics()
 # %%
 ca.update_clusters()
 print_metrics()
+
+# %%
