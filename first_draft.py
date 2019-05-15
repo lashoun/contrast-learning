@@ -19,15 +19,9 @@
 
 # %% [markdown]
 # ## To do
-# - ✔ Compute standard_distances for each cluster
-# - When updating st_dists of cluster, project along both infinite-stdev and
-#   0-stdev dims
-# - Update sensitivity -> how?
+# - get_cluster_analysis: try zero, relevant and inf dimensions again
 # - Inverse law when seeing duplicates
 # - Implement context
-# - Compare stdevs and distances
-# - Clustering validity checking methods (Note: not necessarily relevant
-#   though)
 # - Recollection: random updates vs complete updates?
 # - Hub clusters
 # - Forgetting data
@@ -35,6 +29,15 @@
 # ## Not to do
 # - Implement a tree-like structure for clusters (not relevant if we update
 #   only one outlier point we saw early)
+# - When updating st_dists of cluster, project along both infinite-stdev and
+#   0-stdev dims
+# - Update sensitivity -> how?
+# - Compare stdevs and distances
+#
+# ## Done
+# - ✔ Compute standard_distances for each cluster
+# - ✔ Clustering validity checking methods (Note: not necessarily relevant
+#   though)
 
 # %% [markdown]
 # ## Imports
@@ -55,6 +58,7 @@ from utils import plot_confusion_matrix
 import collections
 import functools
 import itertools
+from sklearn.utils.multiclass import unique_labels
 
 np.random.seed(1)
 
@@ -63,8 +67,8 @@ np.random.seed(1)
 
 # %%
 NB_FEATURES = 5
-NB_GROUPS = 3
-N = 20
+NB_GROUPS = 5
+N = 300
 DOMAIN_LENGTH = 200
 DEV_MAX = 20
 
@@ -134,6 +138,41 @@ def generate_dataset(nb_groups=NB_GROUPS, n=N, nb_features=NB_FEATURES,
 
 
 # %% [markdown]
+# ## Generate or load dataset
+
+# %%
+if SHOULD_LOAD_DATASET:
+    start, end = DATASET_DATA_COLUMNS_INDICES
+    df1 = pd.read_csv(DATASET_PATH_FULL)
+    df1_np = df1.to_numpy(copy=True)
+    data = df1_np[:, start:end].astype('float')
+    clusters_true = df1_np[:, DATASET_CLUSTER_COLUMN_INDEX]
+else:
+    generate_dataset()
+    data = np.load(DATASET_PATH + DATASET_NAME + '_data.npy')
+    clusters_true = np.load(DATASET_PATH + DATASET_NAME +
+                            '_clusters_true.npy').astype(int)
+
+assert data is not None, 'data is None'
+assert clusters_true is not None, 'clusters_true is None'
+
+# print(data)
+# print(clusters_true)
+
+# %% [markdown]
+# ## Preview dataset
+
+# %%
+columns = ["d" + str(i) for i in range(data.shape[1])] + ['true cluster']
+df = pd.DataFrame(np.hstack((data, np.reshape([clusters_true],
+                                              (data.shape[0], 1)))),
+                  columns=columns)
+true_data_plot = sns.pairplot(df, kind="scatter", hue='true cluster',
+                              vars=columns[:-1])
+true_data_plot.savefig(DATASET_PATH + DATASET_NAME + '_true.png')
+
+
+# %% [markdown]
 # ## The agent
 
 # %%
@@ -143,7 +182,7 @@ class ContrastAgent(object):
                  method_multivariate='mmcd',
                  method_univariate='mad',
                  alpha=0.95,
-                 ord=2,
+                 order=2,
                  sensitivenesses=[1, 10, 0.1],
                  shuffleToggle=False,
                  verbose=False):
@@ -153,7 +192,7 @@ class ContrastAgent(object):
         self.method_find = method_find
         self.method_multivariate = method_multivariate
         self.method_univariate = method_univariate
-        self.ord = ord
+        self.order = order
         self.shuffleToggle = shuffleToggle
         self.verbose = verbose
 
@@ -186,6 +225,24 @@ class ContrastAgent(object):
         self.stdist = 0
         self.stdists_per_cluster = []
 
+    def assign_to_cluster(self, pi, cluster_id):
+        old_cluster_id = self.clusters[pi]
+        if old_cluster_id != -1:
+            if self.cluster_sizes[old_cluster_id] == 1:
+                if old_cluster_id != self.nb_clusters - 1:
+                    # put last cluster in its place
+                    self.clusters = np.where(self.clusters != old_cluster_id,
+                                             self.clusters,
+                                             old_cluster_id)
+                    self.cluster_sizes[old_cluster_id] = \
+                        self.cluster_sizes[-1]
+                self.cluster_sizes.pop()
+                self.nb_clusters -= 1
+            else:
+                self.cluster_sizes[old_cluster_id] -= 1
+        self.clusters[pi] = cluster_id
+        self.cluster_sizes[cluster_id] += 1
+
     def clusterize_online(self):
         assert len(self.data), "empty data"
         if self.nb_clusters == 0:
@@ -195,9 +252,6 @@ class ContrastAgent(object):
             self.find_cluster(i, p, until=i)
             if not self.allZeros:
                 self.one_more_seen()
-
-    def distance(self, p, q, ord=2):
-        return(np.linalg.norm(p-q, self.ord))
 
     def feed_data(self, d):
         """Adds data to the agent's memory"""
@@ -216,7 +270,7 @@ class ContrastAgent(object):
             new_clusters_all = np.hstack((self.clusters, new_clusters))
             self.clusters = new_clusters_all
 
-    def find_cluster(self, i, p, until=None, recollection=False):
+    def find_cluster(self, pi, p, until=None, recollection=False):
         """
         The 'method' argument can be on the following:
         'byhand', 'byhand-naive', 'maha', 'cook', 'mmcd'.
@@ -224,8 +278,8 @@ class ContrastAgent(object):
         method = self.method_find
         if method in ['maha', 'cook', 'mmcd']:
             global_ratio = self.get_outlier_ratio(p, self.data)
-            if global_ratio > 1:
-                self.new_cluster(i)
+            if pi == 1 or global_ratio > 1:
+                self.new_cluster(pi)
             else:
                 cluster_ratios = []
                 for j, size in enumerate(self.cluster_sizes):
@@ -234,46 +288,54 @@ class ContrastAgent(object):
                         ratio = self.get_outlier_ratio(p, cluster_points)
                         cluster_ratios.append([j, ratio])
                 cluster_ratios = np.array(cluster_ratios)
-                bci = np.argmin(cluster_ratios[:, 1])
+                ratios_sorted = np.argsort(cluster_ratios[:, 1])
+                bci = ratios_sorted[0]
                 bc = cluster_ratios[bci, 0]
-                self.clusters[i] = bc
-                if self.verbose:
-                    print(cluster_ratios)
-                    print("Best cluster is {} with a ratio of {}".format(
-                        bc, cluster_ratios[bci, 1]))
-                    print("{} -> cluster of {}".format(i, bc))
+                ratio_best = cluster_ratios[bci, 1]
+#                 bci_second = ratios_sorted[1]
+#                 bc_second = cluster_ratios[bci_second, 0]
+#                 ratio_best_second = cluster_ratios[bci_second, 1]
+                if ratio_best > 1:
+                    self.new_cluster(pi)
+                else:
+                    self.assign_to_cluster(pi, bc)
+                    if self.verbose:
+                        print(cluster_ratios)
+                        print("Best cluster is {} with a ratio of {}".format(
+                            bc, cluster_ratios[bci, 1]))
+                        print("{} -> cluster of {}".format(pi, bc))
         elif method == 'byhand-naive':
-            distances = np.array([self.distance(p, q, ord) for q
-                                  in self.data[:until]])
+            cluster_dims = [self.get_cluster_relevant_dimensions(ci)
+                            for ci in range(self.nb_clusters)]
+            distances = np.array([self.get_distance(p, q, self.order, cluster_dims[self.clusters[qi]][2])  # noqa
+                                  for qi, q in enumerate(self.data[:until])])
             self.allZeros = self.allZeros and np.all(distances == 0)
             dist_min = np.min(np.trim_zeros(distances)) if not self.allZeros \
                 else 0
             closest = np.argmin(distances)
             if dist_min > self.sensitiveness_find_cluster * self.stdist and \
                     0 not in distances:
-                self.new_cluster(i)
+                self.new_cluster(pi)
             else:
                 if self.verbose:
-                    print("{} -> cluster of {}".format(i, closest))
-                self.clusters[i] = self.clusters[closest]
+                    print("{} -> cluster of {}".format(pi, closest))
+                self.assign_to_cluster(pi, self.clusters[closest])
                 if not self.allZeros:
-                    self.update_stdists_per_cluster(self.clusters[i], p)
-                self.cluster_sizes[self.clusters[i]] += 1
+                    self.update_stdists_per_cluster(self.clusters[pi], p)
             if not recollection and not self.allZeros:
                 self.update_stdist(self.nb_seen, dist_min)
         else:
-            p_i = i  # Variable i will be replaced afterwards, watch out!
             if method != 'byhand':
                 print("find_cluster: unknown method, using 'byhand'")
             cluster_indexes = []
             cluster_dims = []
             cluster_good_ratios_sum = []
             cluster_bad_ratios_sum = []
-            for i in self.clusters:
-                if i != -1:
+            for j in self.clusters:
+                if j != -1:
                     relevant_dims, good_ratios_sum, bad_ratios_sum, ratios = \
-                            self.get_cluster_analysis(i, p)
-                    cluster_indexes.append(i)
+                            self.get_cluster_analysis(j, p)
+                    cluster_indexes.append(j)
                     cluster_dims.append(relevant_dims)
                     cluster_good_ratios_sum.append(good_ratios_sum)
                     cluster_bad_ratios_sum.append(bad_ratios_sum)
@@ -283,14 +345,14 @@ class ContrastAgent(object):
                               -np.array(cluster_dims)))
             closest = cluster_indexes[ind[0]]
             if self.verbose:
-                print([(cluster_dims[i],
-                        cluster_good_ratios_sum[i],
-                        cluster_bad_ratios_sum[i],
-                        cluster_indexes[i])
-                       for i in ind[0: min(len(ind), 3)]])
+                print([(cluster_dims[j],
+                        cluster_good_ratios_sum[j],
+                        cluster_bad_ratios_sum[j],
+                        cluster_indexes[j])
+                       for j in ind[0: min(len(ind), 3)]])
             if cluster_dims[ind[0]] == 0 or \
                     self.nb_clusters == 1:
-                self.new_cluster(p_i)
+                self.new_cluster(pi)
             else:
                 closest_second = cluster_indexes[ind[1]]
                 cluster_fusion = np.vstack([
@@ -301,18 +363,17 @@ class ContrastAgent(object):
                         p, cluster_fusion, alpha=self.alpha,
                         method=self.method_multivariate)
                 if ratio_fusion > 10:
-                    self.new_cluster(p_i)
+                    self.new_cluster(pi)
                 else:
                     if self.verbose:
-                        print("{} -> cluster of {}".format(p_i, closest))
-                    self.clusters[p_i] = self.clusters[closest]
-                    self.cluster_sizes[self.clusters[p_i]] += 1
+                        print("{} -> cluster of {}".format(pi, closest))
+                    self.assign_to_cluster(pi, self.clusters[closest])
 
-    def get_cluster_analysis(self, i, p, custom_points=[]):
+    def get_cluster_analysis(self, pi, p, custom_points=[]):
         relevant_dims = 0
         good_ratios_sum = 0
         bad_ratios_sum = 0
-        ratios = self.get_outlier_ratio_per_dimension(i, p, custom_points)
+        ratios = self.get_outlier_ratio_per_dimension(pi, p, custom_points)
         for r in ratios:
             if r < 1:
                 relevant_dims += 1
@@ -321,35 +382,45 @@ class ContrastAgent(object):
                 bad_ratios_sum += r
         return(relevant_dims, good_ratios_sum, bad_ratios_sum, ratios)
 
-    def get_cluster_relevant_dimensions(self, i):
+    def get_cluster_relevant_dimensions(self, ci):
         """ return (relevant_dims, inf_dims, zero_dims) """
-        stdist_i = self.stdists_per_cluster[i]
-        cluster_points = self.get_cluster_points(i)
+        assert ci >= 0 and ci < self.nb_clusters, \
+            "Incorrect ci parameter: {}".format(ci)
+        stdist_ci = self.stdists_per_cluster[ci]
+        cluster_points = self.get_cluster_points(ci)
         relevant_dims, inf_dims, zero_dims = [], [], []
         for j in range(cluster_points.shape[1]):
             stdev = np.std(cluster_points[:, j])
-            if stdev > self.sensitiveness_inf_dims * stdist_i:
+            if stdev > self.sensitiveness_inf_dims * stdist_ci:
                 inf_dims.append(j)
-            elif stdev < self.sensitiveness_zero_dims * stdist_i:
+            elif stdev < self.sensitiveness_zero_dims * stdist_ci:
                 zero_dims.append(j)
             else:
                 relevant_dims.append(j)
         return relevant_dims, inf_dims, zero_dims
 
-    def get_cluster_points(self, i):
-        return self.data[np.nonzero(self.clusters == i)]
+    def get_cluster_points(self, ci):
+        return self.data[np.nonzero(self.clusters == ci)]
 
-    def get_nb_obs_per_dimension(self, i):
+    def get_distance(self, p, q, order=2, dimensions=None):
+        if dimensions is not None and len(dimensions) > 0:
+            print("distance on dimensions {}".format(dimensions))
+            return(np.linalg.norm(p[dimensions]-q[dimensions], order))
+        else:
+            return(np.linalg.norm(p-q, order))
+
+    # not used
+    def get_nb_obs_per_dimension(self, ci):
         """ returns the number of distinct observations per dimension """
-        cluster_points = self.get_cluster_points(i)
+        cluster_points = self.get_cluster_points(ci)
         d = cluster_points.shape[1]
         nb_obs = np.zeros(d)
         for j in range(d):
             nb_obs[j] = len(np.unique(cluster_points[:, j]))
         return nb_obs
 
-    def get_outlier_ratio_per_dimension(self, i, p, custom_points=[]):
-        cluster_points = self.get_cluster_points(i)
+    def get_outlier_ratio_per_dimension(self, ci, p, custom_points=[]):
+        cluster_points = self.get_cluster_points(ci)
         if len(custom_points) > 0:
             cluster_points = custom_points
         d = cluster_points.shape[1]
@@ -372,7 +443,6 @@ class ContrastAgent(object):
                   multivariate data
         - 'cook': TODO
         - 'mmcd': TODO
-
         If return value > 1, consider p an outlier
         """
         eps = np.mean(cluster_points_without_p[0]) * 1e-6
@@ -419,7 +489,6 @@ class ContrastAgent(object):
         The 'method' argument can be one of the following:
         - 'mean': mean +- three stdevs
         - 'mad': median absolute deviation, more robust to detect outliers
-
         If the value returned is > 1, consider p an outlier.
         """
         cluster_points = np.hstack([cluster_points_without_p, [p]])
@@ -438,12 +507,14 @@ class ContrastAgent(object):
             else:
                 return (np.abs(p-m)/(threshold*mad))
 
-    def new_cluster(self, p_i):
-        if self.clusters[p_i] == -1 or \
-                not self.cluster_sizes[self.clusters[p_i]] == 1:
+    def new_cluster(self, pi):
+        if self.clusters[pi] == -1 or \
+                not self.cluster_sizes[self.clusters[pi]] == 1:
             if self.verbose:
-                print("{} -> new cluster".format(p_i))
-            self.clusters[p_i] = self.nb_clusters
+                print("{} -> new cluster".format(pi))
+            if self.clusters[pi] != -1:
+                self.cluster_sizes[self.clusters[pi]] -= 1
+            self.clusters[pi] = self.nb_clusters
             self.nb_clusters += 1
             self.cluster_sizes.append(1)
             self.stdists_per_cluster.append(0)
@@ -479,83 +550,55 @@ class ContrastAgent(object):
 
     def update_clusters(self, until_update=None, until_dist=None,
                         recollection=True):
-        for i, p in enumerate(self.data[:until_update]):
-            self.find_cluster(i, p, until=until_dist,
+        for pi, p in enumerate(self.data[:until_update]):
+            self.find_cluster(pi, p, until=until_dist,
                               recollection=recollection)
 
-    def update_stdist(self, nb_seen, distance):
+    def update_stdist(self, nb_seen, dist):
         old_dist = self.stdist
-        self.stdist = (max(1, nb_seen-1) * self.stdist + distance) / (nb_seen)
+        self.stdist = (max(1, nb_seen-1) * self.stdist + dist) / (nb_seen)
         if self.verbose:
             print('distance = {}, self.stdist = {} -> {}'.format(
-                distance, old_dist, self.stdist))
+                dist, old_dist, self.stdist))
 
-    def update_stdists_per_cluster(self, i, p):
-        old_dist = self.stdists_per_cluster[i]
-        relevant_dims, inf_dims, zero_dims = self.get_cluster_dimensions(i)
+    def update_stdists_per_cluster(self, ci, p):
+        old_dist = self.stdists_per_cluster[ci]
+        relevant_dims, inf_dims, zero_dims = \
+                self.get_cluster_relevant_dimensions(ci)
         if len(relevant_dims):
-            cluster_points_rd = self.get_cluster_points(i)[:, relevant_dims]
+            cluster_points_rd = self.get_cluster_points(ci)[:, relevant_dims]
             p_rd = p[relevant_dims]
         elif len(inf_dims):
-            cluster_points_rd = self.get_cluster_points(i)[:, inf_dims]
+            cluster_points_rd = self.get_cluster_points(ci)[:, inf_dims]
             p_rd = p[inf_dims]
         else:
-            cluster_points_rd = self.get_cluster_points(i)[:, zero_dims]
+            cluster_points_rd = self.get_cluster_points(ci)[:, zero_dims]
             p_rd = p[zero_dims]
-        array_dists = np.array([self.distance(p_rd, q) for q in
+        array_dists = np.array([self.get_distance(p_rd, q, self.order) for q in
                                 cluster_points_rd])
 #         print(relevant_dims, inf_dims, zero_dims)
 #         print(array_dists)
         dist_p = np.min(array_dists)
         csize = cluster_points_rd.shape[0]
-        self.stdists_per_cluster[i] = (old_dist * csize + dist_p) / (csize + 1)
+        self.stdists_per_cluster[ci] = (old_dist * csize + dist_p) / (csize + 1)  # noqa
 
-
-# %% [markdown]
-# ## Generate or load dataset
-
-# %%
-if SHOULD_LOAD_DATASET:
-    start, end = DATASET_DATA_COLUMNS_INDICES
-    df1 = pd.read_csv(DATASET_PATH_FULL)
-    df1_np = df1.to_numpy(copy=True)
-    data = df1_np[:, start:end].astype('float')
-    clusters_true = df1_np[:, DATASET_CLUSTER_COLUMN_INDEX]
-else:
-    generate_dataset()
-    data = np.load(DATASET_PATH + DATASET_NAME + '_data.npy')
-    clusters_true = np.load(DATASET_PATH + DATASET_NAME +
-                            '_clusters_true.npy').astype(int)
-
-assert data is not None, 'data is None'
-assert clusters_true is not None, 'clusters_true is None'
-
-# print(data)
-# print(clusters_true)
-
-# %% [markdown]
-# ## Preview dataset
-
-# %%
-columns = ["d" + str(i) for i in range(data.shape[1])] + ['true cluster']
-df = pd.DataFrame(np.hstack((data, np.reshape([clusters_true],
-                                              (data.shape[0], 1)))),
-                  columns=columns)
-true_data_plot = sns.pairplot(df, kind="scatter", hue='true cluster',
-                              vars=columns[:-1])
-true_data_plot.savefig(DATASET_PATH + DATASET_NAME + '_true.png')
 
 # %% [markdown]
 # ## Clusterize
 
 # %%
-ca = ContrastAgent(method_find='byhand', sensitivenesses=[1.25, 10, 0.1],
-                   shuffleToggle=False, verbose=True)
+ca = ContrastAgent(method_find='byhand-naive', sensitivenesses=[1.5, 10, 0.1],
+                   shuffleToggle=True, verbose=False, alpha=0.9)
 ca.feed_data(data)
 ca.clusterize_online()
 if ca.method_find == 'byhand-naive':
     print("Final stdist: {}".format(ca.stdist))
 print("All points in a cluster? {}".format(-1 not in ca.clusters))
+print("Number of clusters: {}".format(len(unique_labels(ca.clusters))))
+unique, counts = np.unique(ca.clusters, return_counts=True)
+print(np.array([unique, counts]))
+
+# %%
 ca.print_clusters()
 
 
@@ -563,7 +606,7 @@ ca.print_clusters()
 # ## Performance metrics
 
 # %%
-def print_metrics():
+def print_metrics(confusion_matrix_only=True):
     if clusters_true is not None:
         # clusters_true2 will contain ids instead of labels
         ids = collections.defaultdict(functools.partial(next,
@@ -571,6 +614,19 @@ def print_metrics():
         clusters_true2 = np.array([ids[label] for label in clusters_true])
         if ca.shuffleToggle:
             clusters_true2 = clusters_true2[ca.permutation]
+
+    if clusters_true is not None:
+        class_names = np.array([str(i) for i in range(1+np.max(
+            np.concatenate([clusters_true2, ca.clusters])))])
+        plot_confusion_matrix(
+            clusters_true2, ca.clusters, classes=class_names,
+            normalize=True, title='Normalized confusion matrix',
+            path=DATASET_PATH + DATASET_NAME)
+
+    if confusion_matrix_only:
+        return
+
+    if clusters_true is not None:
         print("--- Metrics involving ground truth--- ")
         print("Adjusted Rand Index: {}".format(
             metrics.adjusted_rand_score(clusters_true2, ca.clusters)))
@@ -603,21 +659,10 @@ def print_metrics():
     print("Davies-Bouldin score (agent): {}".format(
         metrics.davies_bouldin_score(ca.data, ca.clusters)))
 
-    if clusters_true is not None:
-        print()
-        class_names = np.array([str(i) for i in range(1+np.max(
-            np.concatenate([clusters_true2, ca.clusters])))])
-        plot_confusion_matrix(
-            clusters_true2, ca.clusters, classes=class_names,
-            normalize=True, title='Normalized confusion matrix',
-            path=DATASET_PATH + DATASET_NAME)
-
 
 # %%
 print_metrics()
 
 # %%
-ca.update_clusters()
-print_metrics()
-
-# %%
+# ca.update_clusters()
+# print_metrics()
