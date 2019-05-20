@@ -312,7 +312,7 @@ class ContrastAgent(object):
         elif method == 'byhand-naive':
             cluster_dims = [self.get_cluster_relevant_dimensions(ci)
                             for ci in range(self.nb_clusters)]
-            distances = np.array([self.get_distance(p, q, self.order, cluster_dims[self.clusters[qi]][2])  # noqa
+            distances = np.array([self.get_distance(p, q, self.order, cluster_dims[self.clusters[qi]][0])  # noqa
                                   for qi, q in enumerate(self.data[:until])])
             self.allZeros = self.allZeros and np.all(distances == 0)
             dist_min = np.min(np.trim_zeros(distances)) if not self.allZeros \
