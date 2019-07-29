@@ -1,0 +1,5 @@
+name;color;size;shape;points;bulges;petals;direction;queue
+spade;(0,0,0)..(128,128,128);N(14,4);0.8;1;2;1;1;1
+clubs;(0,0,0)..(128,128,128);N(14,4);0.87;0;3;3;1;1
+heart;red;N(14, 4);0.93;1;2;0;-1;0
+diamond;red, blue;N(14, 4);0.8;4;0;0;0;0

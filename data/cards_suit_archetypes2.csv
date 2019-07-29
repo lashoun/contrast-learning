@@ -1,0 +1,5 @@
+name;color;size;shape;points;bulges;petals;direction;queue;symmetries;creases;curviness
+spade;white..black;N(14,4);1;2;1;1;1;1;2;3
+clubs;white..black;N(14,4);0;3;3;1;1;1;4;4
+heart;red..green;N(14, 4);1;2;0;-1;0;1;1;2
+diamond;red, blue;N(14, 4);4;0;0;0;0;3;0;0
