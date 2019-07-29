@@ -59,5 +59,5 @@ def plot_confusion_matrix(y_true, y_pred, classes,
                     color="white" if cm[i, j] > thresh else "black")
     fig.tight_layout()
     if should_save:
-        plt.savefig(path + '_confusion_matrix.png')
+        plt.savefig(path + '_non_contrast_confusion_matrix.png')
     return ax

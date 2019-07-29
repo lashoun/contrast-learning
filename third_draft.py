@@ -14,7 +14,11 @@
 # ---
 
 # %% [markdown]
-# ## Second draft of Contrast algorithm
+# ## Third draft of Contrast algorithm
+
+# %% [markdown]
+# - Rapport update
+# - Seed random
 
 # %% [markdown]
 # ## Imports
@@ -36,6 +40,7 @@ import collections
 import functools
 import itertools
 import tkinter as tk
+from tkinter.font import Font
 # from sklearn.utils.multiclass import unique_labels
 
 np.random.seed(1)
@@ -56,7 +61,8 @@ COLORS = ['r', 'g', 'b', 'y', 'c', 'm']
 # stocks metadata as (DATASET_NAME, DATASET_EXTENSION, DATASET_PATH,
 #     \ DATASET_CLUSTER_COLUMN_INDEX, DATASET_DATA_COLUMNS_INDICES)
 METADATA = {
-    'Cards': ('Cards', '.csv', 'data/', 1, (2, None)),
+    'Cards': ('Cards', '.csv', 'data/', 1, (2, None), ["points", "bulges", "petals", "direction", "queue", "red", "green", "blue", "width", "height"]),
+    'Cards2': ('Cards2', '.csv', 'data/', 1, (2, None), ["points", "bulges", "petals", "direction", "queue", "symmetries", "creases", "curviness", "red", "green", "blue", "width", "height"]),
     'Cards_truncated': ('Cards', '.csv', 'data/', 1, (2, 7)),
     'Zoo': ('zoo', '.csv', 'data/', 1, (2, None))
 }
@@ -64,10 +70,10 @@ METADATA = {
 SHOULD_LOAD_DATASET = 1  # 0 to generate, 1 to load csv, 2 to load sklearn
 
 if SHOULD_LOAD_DATASET == 1:
-    NAME = 'Cards'
+    NAME = 'Cards2'
     DATASET_NAME, DATASET_EXTENSION, DATASET_PATH, \
         DATASET_CLUSTER_COLUMN_INDEX, \
-        DATASET_DATA_COLUMNS_INDICES = METADATA[NAME]
+        DATASET_DATA_COLUMNS_INDICES, ADJECTIVES = METADATA[NAME]
     DATASET_PATH_FULL = DATASET_PATH + DATASET_NAME + DATASET_EXTENSION
 elif SHOULD_LOAD_DATASET == 0:
     DATASET_PATH = 'data/'
@@ -118,6 +124,7 @@ def generate_dataset(nb_groups=NB_GROUPS, n=N, nb_features=NB_FEATURES,
     group_sizes *= n / np.sum(group_sizes)
     group_sizes = np.trim_zeros(np.round(group_sizes)).astype(int)
     data = [generate_cluster(n_cluster) for n_cluster in group_sizes]
+
     data = np.vstack(data)
     clusters_true = np.concatenate([n_cluster * [i] for i, n_cluster in
                                     enumerate(group_sizes)])
@@ -128,6 +135,9 @@ def generate_dataset(nb_groups=NB_GROUPS, n=N, nb_features=NB_FEATURES,
 def shuffle(data_to_shuffle):
     new_permutation = np.random.permutation(len(data_to_shuffle))
     return(data_to_shuffle[new_permutation])
+
+def color_converter(r, g, b):
+    return('#%02x%02x%02x' % (int(r), int(g), int(b)))
 
 
 # %% [markdown]
@@ -167,14 +177,13 @@ nb_clusters_true = np.max(clusters_true2) + 1
 # ## Preview dataset
 
 # %%
-columns = ["d" + str(i) for i in range(data.shape[1])] + ['true cluster']
-df = pd.DataFrame(np.hstack((data, np.reshape([clusters_true],
-                                              (data.shape[0], 1)))),
-                  columns=columns)
-true_data_plot = sns.pairplot(df, kind="scatter", hue='true cluster',
-                              vars=columns[:-1])
-true_data_plot.savefig(DATASET_PATH + DATASET_NAME + '_true.png')
-
+# columns = ["d" + str(i) for i in range(data.shape[1])] + ['true cluster']
+# df = pd.DataFrame(np.hstack((data, np.reshape([clusters_true],
+#                                               (data.shape[0], 1)))),
+#                   columns=columns)
+# true_data_plot = sns.pairplot(df, kind="scatter", hue='true cluster',
+#                               vars=columns[:-1])
+# true_data_plot.savefig(DATASET_PATH + DATASET_NAME + '_true.png')
 
 # %% [markdown]
 # ## The agent
@@ -183,6 +192,7 @@ true_data_plot.savefig(DATASET_PATH + DATASET_NAME + '_true.png')
 class ContrastAgent(object):
     def __init__(self,
                  cmemory_size=50,
+                 divide_by_dev=False,
                  eps=0.01,
                  maxi=2.5,
                  memory_size=50,
@@ -192,11 +202,15 @@ class ContrastAgent(object):
                  update_method=2):
 
         self.deviations = {1: [], 2: []}
+        self.divide_by_dev = divide_by_dev
         self.eps = eps
         self.maxi = maxi
         self.memories = {1: [], 2: []}
         self.memory_sizes = {1: memory_size, 2: cmemory_size}
         self.mini = mini
+        self.names_contrasts_neg = []
+        self.names_contrasts_pos = []
+        self.names_prototypes = []
         self.nb_closest = nb_closest
         self.nb_winners = nb_winners
         self.update_method = update_method
@@ -230,25 +244,34 @@ class ContrastAgent(object):
             winner_indices = []
         return indices
 
-    def extract_contrasts(self, obj, contrast_indices, data_order, fill_with_zeros=False):
+    def extract_contrasts(self, obj, contrast_indices, data_order, fill_with_zeros=False, objects=[], use_objects=False):
         contrasts = []
-        for i in contrast_indices:
+        inversions = []
+        for obj_i, i in enumerate(contrast_indices):
             # dim_contrast = 0  # TEST
             new_contrast = np.zeros(len(obj))
             # print("should be a new prototype: {}".format(self.memories[data_order][i]))  # TEST
             for j in range(len(obj)):
                 if not self.is_in_cluster_dimension(obj, i, j, data_order, tolerance=1):
                     # dim_contrast += 1 # TEST
-                    new_contrast[j] = obj[j] - self.memories[data_order][i][j]
+                    new_contrast[j] = (obj[j] - self.memories[data_order][i][j])
+                    if use_objects:
+                        new_contrast[j] = (obj[j] - objects[obj_i][j])
+                    if self.divide_by_dev:
+                        new_contrast /= self.deviations[data_order][i][j]
             # if new_contrasts is not zero and has at least one zero
             if np.any(new_contrast) and not np.all(new_contrast):
                 if np.all(new_contrast <= 0):  # if everything negative, change to positive
                     new_contrast *= -1
+                    inversions.append(True)
+                else:
+                    inversions.append(False)
                 contrasts.append(new_contrast)
             elif fill_with_zeros:
                 contrasts.append(np.zeros(len(obj)))
+                inversions.append(False)
             # print("dim_contrast: {}".format(dim_contrast)) # TEST
-        return np.array(contrasts)
+        return (np.array(contrasts), inversions)
 
     def feed_data_online(self, new_data, data_order):
         is_empty = len(self.memories[data_order]) == 0
@@ -264,10 +287,34 @@ class ContrastAgent(object):
                 update=True, nb_winners=nb_winners))
             if data_order == 1:
 #                 new_contrasts = np.abs(self.memories[data_order][-(nb+1):-1] - obj)
-                new_contrasts = self.extract_contrasts(obj, list(range(-(nb+1),-1)), data_order)
+                new_contrasts = self.extract_contrasts(obj, list(range(-(nb+1),-1)), data_order)[0]
                 if len(new_contrasts) > 0:
                     self.feed_data_online(new_contrasts, data_order=2)
             self.forget_if_needed(data_order)
+    
+    def find_closest_object(self, proto_i, data, data_order=1):
+        """ finds the closest object to the prototype (relevant dimensions then distance)"""
+        matching_dims = np.zeros(len(data))
+        for i, obj in enumerate(data):
+            for j in range(len(obj)):
+                if self.is_in_cluster_dimension(obj, proto_i, j, data_order):
+                    matching_dims[i] += 1
+        max_dims = np.max(matching_dims)
+        closest_indices = \
+            np.flatnonzero(matching_dims == max_dims)
+        closest_objects = [data[i] for i in closest_indices]
+        best_i = 0
+        best_d = np.inf
+        proto_vec = self.memories[data_order][proto_i]
+        proto_dev = self.deviations[data_order][proto_i]
+        for i, obj in enumerate(closest_objects):
+            d = 0
+            for j, x in enumerate(obj):
+                d += np.abs(obj[j] - proto_vec[j]) / proto_dev[j]
+            if d < best_d:
+                best_d = d
+                best_i = i
+        return closest_indices[best_i]
 
     def find_cluster(self, obj, data_order, update=True, nb_winners=1):
         n_closest_indices, max_dims = self.find_n_closest_prototypes(obj,
@@ -291,7 +338,7 @@ class ContrastAgent(object):
 
     def find_description(self, obj, data_order, nb_winners=4):
         winner_indices1 = self.find_cluster(obj, data_order, update=False, nb_winners=nb_winners)
-        raw_contrasts = self.extract_contrasts(obj, winner_indices1, data_order, fill_with_zeros=True)
+        raw_contrasts, inversions  = self.extract_contrasts(obj, winner_indices1, data_order, fill_with_zeros=True)
         winner_indices2 = []
         for contrast in raw_contrasts:
             if not np.any(contrast):
@@ -312,8 +359,8 @@ class ContrastAgent(object):
                 bit_weight2 = np.nonzero(weights_sorted2==w2)[0][0] + 1
             final_bit_weights.append(bit_weight1 * bit_weight2)
         best = np.argmin(final_bit_weights)
-        return(winner_indices1[best], winner_indices2[best])
-
+        return(winner_indices1[best], winner_indices2[best], inversions[best])
+    
     def find_n_closest_prototypes(self, obj, data_order, n=4):
         matching_dims = np.zeros(len(self.memories[data_order]))
         for i in range(len(self.memories[data_order])):
@@ -338,6 +385,61 @@ class ContrastAgent(object):
                 # print("index {}: {} matching dims".format(i, matching_dims[i]))  # TEST
         return closest_indices.tolist(), max_dims
 
+    def find_optimal_description(self, shuffled_data, descriptions, canvas, data_order=1):
+        "describes the first object in shuffled_data compared to the others"
+        obj = shuffled_data[0]
+        obj_desc = descriptions[0]
+        base_str = "Object 1 is "
+        same_proto = [desc[0] != obj_desc[0] for desc in descriptions[1:]]
+        proto_translated = self.translate_prototype(obj_desc[0])
+        if all(same_proto):
+            canvas.create_text(cw/2, yshift + 350, fill="black", font="Droid", text=base_str + proto_translated)
+            return
+        else:
+            contrast_indices = []
+            objects = []
+            for i, is_different in enumerate(same_proto):
+                if not is_different:
+                    contrast_indices.append(descriptions[i+1][0])
+                    objects.append(shuffled_data[i+1])
+            raw_contrasts, inversions  = self.extract_contrasts(obj, contrast_indices, data_order, fill_with_zeros=True, objects=objects, use_objects=True)
+            winner_indices2 = []
+            for contrast in raw_contrasts:
+                if not np.any(contrast):
+                    winner_indices2.append(-1)
+                else:
+                    winner_array2 = self.find_cluster(contrast, data_order+1, update=False, nb_winners=1)  # only one contrast max
+                    winner_indices2.append(winner_array2[0])
+            final_bit_weights = []
+            weights_sorted1 = np.sort(self.weights[data_order])[::-1]
+            weights_sorted2 = np.sort(self.weights[data_order+1])[::-1]
+            pop_later = []
+            for i, index1 in enumerate(contrast_indices):
+                w1 = ca.weights[data_order][index1]
+                bit_weight1 = np.nonzero(weights_sorted1==w1)[0][0] + 1
+                index2 = winner_indices2[i]
+                bit_weight2 = 1
+                if index2 != -1:
+                    w2 = ca.weights[data_order+1][index2]
+                    bit_weight2 = np.nonzero(weights_sorted2==w2)[0][0] + 1
+                    final_bit_weights.append(bit_weight1 * bit_weight2)
+                else:
+                    pop_later.append(i)
+            for i in pop_later:
+                winner_indices2.pop(i)
+                inversions.pop(i)
+            if len(final_bit_weights) > 0:
+                best = np.argmin(final_bit_weights)
+                final_desc = (winner_indices2[best], inversions[best])
+#                 print(final_desc)
+    #             adverbs = ["less", "more"]
+    #             if final_desc[-1]:
+    #                 adverbs = ["more", "less"]
+    #             canvas.create_text(cw/2, yshift + 400, fill="black", font="Droid", text=base_str + proto_translated + " " + adverbs[final_desc[-1]] + " " + str(final_desc[0]))
+                canvas.create_text(cw/2, yshift + 400, fill="black", font="Droid", text=base_str + proto_translated + " " + self.translate_contrast(final_desc[0], final_desc[1]))
+            else:
+                canvas.create_text(cw/2, yshift + 400, fill="black", font="Droid", text=base_str + proto_translated + ", unable to determine contrast")
+    
     def forget_if_needed(self, data_order):
         while len(self.memories[data_order]) > self.memory_sizes[data_order]:
             i = np.argmin(self.weights[data_order])
@@ -354,7 +456,85 @@ class ContrastAgent(object):
             self.adjusted_threshold(self.weights[data_order][i],
                                     self.maxi, self.mini) * \
             tolerance
-
+    
+    def learn_names(self, objects, prototype_labels, contrast_labels, data_order=1):
+        self.names_prototypes = ["?"] * len(self.memories[data_order])
+        self.names_contrasts_pos = ["?"] * len(self.memories[data_order])
+        self.names_contrasts_neg = ["?"] * len(self.memories[data_order])
+        for i, obj in enumerate(objects):
+            desc = self.find_description(obj, data_order=data_order, nb_winners=4)
+            self.names_prototypes[desc[0]] = prototype_labels[i]
+            if desc[2]:
+                self.names_contrasts_neg[desc[1]] = contrast_labels[i]
+            else:
+                self.names_contrasts_pos[desc[1]] = contrast_labels[i]
+        return
+             
+    def translate_contrast(self, contrast_i, is_inverted, hardcoded=False):
+        if hardcoded:
+            adverbs = ["less", "more"]
+            if is_inverted:
+                adverbs = ["more", "less"]
+            contrast_vec = ca.memories[2][contrast_i]
+            positive_values = [x > 0 for x in contrast_vec]
+            negative_values = [x < 0 for x in contrast_vec]
+            adjectives = ADJECTIVES
+            description = ""
+            if any(positive_values):
+                positive_desc = adverbs[not is_inverted] + " "
+                comma = False
+                for i, is_pos in enumerate(positive_values):
+                    if is_pos:
+                        if comma:
+                            positive_desc += ", "
+                        positive_desc += adjectives[i]
+                        comma = True
+                description += positive_desc
+            if any(negative_values):
+                negative_desc = adverbs[is_inverted] + " "
+                comma = False
+                for i, is_neg in enumerate(negative_values):
+                    if is_neg:
+                        if comma:
+                            negative_desc += ", "
+                        negative_desc += adjectives[i]
+                        comma = True
+                if description != "":
+                    description += ", "
+                description += negative_desc
+            return description
+        else:
+            assert len(self.names_contrasts_pos) > 0, "positive contrast names not learned"
+            assert len(self.names_contrasts_neg) > 0, "negative contrast names not learned"
+            name_pos = self.names_contrasts_pos[contrast_i]
+            name_neg = self.names_contrasts_neg[contrast_i]
+            adverbs = ["less", "more"]
+            if name_pos != "?":
+                return adverbs[not is_inverted] + " " + name_pos
+            elif name_neg != "?":
+                return adverbs[is_inverted] + " " + name_neg
+            else:
+                return adverbs[not is_inverted] + " " + str(contrast_i)
+    
+    def translate_prototype(self, proto_i, hardcoded=False):
+        if hardcoded:
+            proto_vec = self.memories[1][proto_i]
+            proto_type = "Spade"
+            if proto_vec[0] == 0:
+                proto_type = "Clubs"
+            elif proto_vec[0] == 4:
+                proto_type = "Diamond"
+            elif proto_vec[1] == 2:
+                proto_type = "Heart"
+            return(proto_type)
+        else:
+            assert len(self.names_prototypes) > 0, "prototype names not learned"
+            name = self.names_prototypes[proto_i]
+            if name != "?":
+                return name
+            else:
+                return str(proto_i)
+    
     def update_clusters(self, obj, data_order,
                         winner_indices=None, method=2):
         """
@@ -564,16 +744,17 @@ manipulate_data(MANIPULATION_ROUNDS)
 # ## Clusterize
 
 # %%
-ca = ContrastAgent(cmemory_size=20,
+ca = ContrastAgent(cmemory_size=10,
+                   divide_by_dev=True,
                    eps=0.01,
                    maxi=1,
-                   memory_size=20,
+                   memory_size=10,
                    mini=1,
                    nb_closest=4,
                    nb_winners=1,
                    update_method=2)
 
-NB_REPETITIONS = 1
+NB_REPETITIONS = 4
 SHUFFLE_DATA_ENABLED = 1
 for i in range(NB_REPETITIONS):
     if SHUFFLE_DATA_ENABLED:
@@ -593,48 +774,77 @@ def print_metrics(d, ctrue, method="closest", nb_winners=4, tolerance=2.5, nb_pr
 
 
 PRINT_METRICS_DEFINED = True
-print_metrics(new_data, clusters_true2, method="closest", nb_winners=1, tolerance=2.5)
+print_metrics(new_data, clusters_true2, method="closest", nb_winners=1, tolerance=1)
 
 # %% [markdown]
 # ## Description tests
 
 # %%
-for obj in new_data:
-    winner = ca.find_cluster(obj, data_order=1, update=False, nb_winners=1)[0]
-    cluster, contrast = ca.find_description(obj, data_order=1, nb_winners=4)
-    if winner != cluster:
-        print("Candidates:", ca.find_cluster(obj, data_order=1, update=False, nb_winners=4))
-        print("Winner:", winner)
-        print("Description:", cluster, contrast)
-        print()
+# for obj in new_data:
+#     winner = ca.find_cluster(obj, data_order=1, update=False, nb_winners=1)[0]
+#     cluster, contrast = ca.find_description(obj, data_order=1, nb_winners=4)
+#     if winner != cluster:
+#         print("Candidates:", ca.find_cluster(obj, data_order=1, update=False, nb_winners=4))
+#         print("Winner:", winner)
+#         print("Description:", cluster, contrast)
+#         print()
+
+# %%
+assert NAME == 'Cards2', "use dataset Cards2"
+example_indices = [0, 4, 16, 21, 32, 33, 41, 44, 56, 69, 70, 77]
+prototype_labels = ["Spade", "Spade", "Spade", "Clubs", "Clubs", "Clubs", "Heart", "Heart", "Heart", "Diamond", "Diamond", "Diamond"]
+contrast_labels = ["small", "white", "huge", "big", "black", "white", "light red", "small", "dark red", "tiny", "big", "light blue"]
+examples = [data[i] for i in example_indices]
+ca.learn_names(examples, prototype_labels, contrast_labels, data_order=1)
 
 
 # %% [markdown]
 # ## GUI descriptions
 
 # %%
-def add_heart(canvas, tag, shift=0, w=300, h=300, color="#fff", linewidth=2):
-    circle1 = np.array([0, 0, w/2, 2*h/3]) + shift
-    circle2 = np.array([w/2, 0, w, 2*h/3]) + shift
-    triangle = np.array([0, h/3, w, h/3, w/2, h]) + shift
-    line = np.array([0+1, h/3, w-1, h/3]) + shift
+def add_heart(canvas, tag, xshift=0, yshift=0, w=300, h=300, color="#fff", linewidth=2):
+    circle1 = np.array([0, 0, w/2, 2*h/3])
+    circle2 = np.array([w/2, 0, w, 2*h/3])
+    triangle = np.array([0, h/3, w, h/3, w/2, h])
+    line = np.array([0+1, h/3, w-1, h/3])
+    circle1[::2] += xshift
+    circle2[::2] += xshift
+    triangle[::2] += xshift
+    line[::2] += xshift
+    circle1[1::2] += yshift
+    circle2[1::2] += yshift
+    triangle[1::2] += yshift
+    line[1::2] += yshift
     canvas.create_arc(*zip(circle1), start=0, extent=180, outline="#000", fill=color, width=linewidth, tags=tag)
     canvas.create_arc(*zip(circle2), start=0, extent=180, outline="#000", fill=color, width=linewidth, tags=tag)
     canvas.create_polygon(*zip(triangle), outline='#000', fill=color, width=linewidth, tags=tag)
     canvas.create_line(*zip(line), fill=color, width=linewidth, tags=tag)
     
-def add_diamond(canvas, tag, shift=0, w=300, h=300, color="#fff", linewidth=2):
-    diamond = np.array([0, w/2, w/2, 0, w, h/2, w/2, h]) + shift
+def add_diamond(canvas, tag, xshift=0, yshift=0, w=300, h=300, color="#fff", linewidth=2):
+    diamond = np.array([0, h/2, w/2, 0, w, h/2, w/2, h])
+    diamond[::2] += xshift
+    diamond[1::2] += yshift
     canvas.create_polygon(*zip(diamond), outline='#000', fill=color, width=linewidth, tags=tag)
 
-def add_spade(canvas, tag, shift=0, w=300, h=300, color="#fff", linewidth=2):
-    circle1 = np.array([0, h/3, w/2, h]) + shift
-    circle2 = np.array([w/2, h/3, w, h]) + shift
-    triangle = np.array([0, 2*h/3, w, 2*h/3, w/2, 0]) + shift
-    triangle2 = np.array([w/2, 2*h/3, w/2-w/7, 9*h/8, w/2+w/7, 9*h/8]) + shift
-    triangle3 = np.array([w/2, 2*h/3, w/2-w/30, 5*h/6, w/2+w/30, 5*h/6]) + shift
-    line = np.array([0+1, 2*h/3, w-1, 2*h/3]) + shift
-    line2 = np.array([0, h, w, h]) + shift
+def add_spade(canvas, tag, xshift=0, yshift=0, w=300, h=300, color="#fff", linewidth=2):
+    circle1 = np.array([0, h/3, w/2, h]) 
+    circle2 = np.array([w/2, h/3, w, h])
+    triangle = np.array([0, 2*h/3, w, 2*h/3, w/2, 0])
+    triangle2 = np.array([w/2, 2*h/3, w/2-w/7, 9*h/8, w/2+w/7, 9*h/8])
+    triangle3 = np.array([w/2, 2*h/3, w/2-w/30, 5*h/6, w/2+w/30, 5*h/6]) 
+    line = np.array([0+1, 2*h/3, w-1, 2*h/3])
+    circle1[::2] += xshift
+    circle2[::2] += xshift
+    triangle[::2] += xshift
+    triangle2[::2] += xshift
+    triangle3[::2] += xshift
+    line[::2] += xshift
+    circle1[1::2] += yshift
+    circle2[1::2] += yshift
+    triangle[1::2] += yshift
+    triangle2[1::2] += yshift
+    triangle3[1::2] += yshift
+    line[1::2] += yshift
     canvas.create_arc(*zip(circle1), start=180, extent=180, outline="#000", fill=color, width=linewidth, tags=tag)
     canvas.create_arc(*zip(circle2), start=180, extent=180, outline="#000", fill=color, width=linewidth, tags=tag)
     canvas.create_polygon(*zip(triangle), outline='#000', fill=color, width=linewidth, tags=tag)
@@ -642,14 +852,22 @@ def add_spade(canvas, tag, shift=0, w=300, h=300, color="#fff", linewidth=2):
     canvas.create_polygon(*zip(triangle3), outline=color, fill=color, width=linewidth, tags=tag)
     canvas.create_line(*zip(line), fill=color, width=linewidth, tags=tag)
 
-def add_club(canvas, tag, shift=0, w=300, h=300, color="#fff", linewidth=2):
-    circle1 = np.array([0, h/2-h/5, w/2, h-h/5]) + shift
-    circle2 = np.array([w/2, h/2-h/5, w, h-h/5]) + shift
-    circle3 = np.array([w/4, 0, 3*w/4, h/2]) + shift
-    triangle2 = np.array([w/2, 2*h/3-h/5, w/2-w/7, 9*h/8-h/5, w/2+w/7, 9*h/8-h/5]) + shift
-    triangle3 = np.array([w/2, 2*h/3-h/5, w/2-w/10, 4*h/5-h/5, w/2+w/10, 4*h/5-h/5]) + shift
-    line = np.array([0+4, 2*h/3-h/5, w-4, 2*h/3-h/5]) + shift
-    line2 = np.array([0, h, w, h]) + shift
+def add_clubs(canvas, tag, xshift=0, yshift=0, w=300, h=300, color="#fff", linewidth=2):
+    circle1 = np.array([0, h/2-h/5, w/2, h-h/5])
+    circle2 = np.array([w/2, h/2-h/5, w, h-h/5])
+    circle3 = np.array([w/4, 0, 3*w/4, h/2])
+    triangle2 = np.array([w/2, 2*h/3-h/5, w/2-w/7, h, w/2+w/7, h]) 
+    triangle3 = np.array([w/2, 2*h/3-h/5, w/2-w/10, 4*h/5-h/5, w/2+w/10, 4*h/5-h/5]) 
+    circle1[::2] += xshift
+    circle2[::2] += xshift
+    circle3[::2] += xshift
+    triangle2[::2] += xshift
+    triangle3[::2] += xshift
+    circle1[1::2] += yshift
+    circle2[1::2] += yshift
+    circle3[1::2] += yshift
+    triangle2[1::2] += yshift
+    triangle3[1::2] += yshift
     canvas.create_oval(*zip(circle1), outline="#000", fill=color, width=linewidth, tags=tag)
     canvas.create_oval(*zip(circle2), outline="#000", fill=color, width=linewidth, tags=tag)    
     canvas.create_oval(*zip(circle3), outline="#000", fill=color, width=linewidth, tags=tag)
@@ -659,14 +877,58 @@ def add_club(canvas, tag, shift=0, w=300, h=300, color="#fff", linewidth=2):
 
 
 # %%
+nb_group = 5
 root = tk.Tk()
-cw = 1000
-ch = 1000
+cw = 1050
+ch = 500
 # w = tk.Label(root, text="Hello Tkinter!")
 canvas = tk.Canvas(root, bg="#ffffff", width=cw, height=ch)
+
 canvas.pack()
-assert NAME = 'Cards', "User should be using the cards dataset"
 data_with_clusters = np.hstack((data, np.reshape([clusters_true], (data.shape[0], 1))))
+
+shuffled_data = shuffle(data_with_clusters)[:nb_group]
+
+add_functions = {}
+add_functions["Spade"] = add_spade
+add_functions["Diamond"] = add_diamond
+add_functions["Heart"] = add_heart
+add_functions["Clubs"] = add_clubs
+# [1,2,1,1,1], [0,3,3,1,1], [1,2,0,-1,1], [4,0,0,0,0]
+
+xshift = 120
+yshift = 50
+
+descriptions = []
+canvas.create_text(xshift-70, yshift+30, fill="black", font="Droid", text="Objects")
+canvas.create_text(xshift-70, yshift+180, fill="black", font="Droid", text="\"Prototype\"")
+canvas.create_text(xshift-70, yshift+300, fill="black", font="Droid", text="Descriptions")
+for obj in shuffled_data:
+    add_functions[obj[-1]](canvas, xshift=xshift, yshift=yshift, tag='test', w=5*obj[-3], h=5*obj[-2], color=color_converter(obj[-6], obj[-5], obj[-4]))
+    descriptions.append(ca.find_description(obj[:-1], data_order=1, nb_winners=4))
+    proto_i = descriptions[-1][0]
+#     display_vec = ca.memories[1][proto_i].tolist() # the prototype itself
+    best_obj_i = ca.find_closest_object(proto_i, data, data_order=1)
+    display_vec = data[best_obj_i].tolist() # closest object to prototype
+    display_type = "Spade"
+    if display_vec[0] == 0:
+        display_type = "Clubs"
+    elif display_vec[0] == 4:
+        display_type = "Diamond"
+    elif display_vec[1] == 2:
+        display_type = "Heart"
+    display_vec.append(display_type)
+    
+    add_functions[display_vec[-1]](canvas, xshift=xshift, yshift=yshift + 150, tag='test', w=5*display_vec[-3], h=5*display_vec[-2], color=color_converter(display_vec[-6], display_vec[-5], display_vec[-4]))
+    canvas.create_text(xshift+50, yshift+300, fill="black", font="Droid", text=str(descriptions[-1]))
+    xshift += 200
+
+ca.find_optimal_description([obj[:-1] for obj in shuffled_data], descriptions, canvas)
+    
+root.update_idletasks()
+root.update()
+
+root.mainloop()
 
 
 # %% [markdown]
