@@ -1,4 +1,4 @@
-# contrast-learning
+# Contrast Learning
 
 ## Abstract
 
