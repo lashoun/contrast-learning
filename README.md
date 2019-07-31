@@ -10,4 +10,4 @@ Launch the jupyter notebook `third_draft.py` and run all cells in order.
 
 ## Report
 
-For more information, read the [following report](https://github.com/lashoun/contrast-learning/blob/master/report.pdf)
+For more information, read the [following report](https://github.com/lashoun/contrast-learning/blob/master/report.pdf).
