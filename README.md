@@ -6,7 +6,7 @@ Recent advances in artificial intelligence have allowed algorithms to perform cl
 
 ## How to use
 
-Launch the jupyter notebook `third_draft.py` and run all cells in order.
+Launch the jupyter notebook `third_draft.ipynb` and run all cells in order.
 
 ## Report
 
